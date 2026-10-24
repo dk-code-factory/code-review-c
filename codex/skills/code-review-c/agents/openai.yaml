@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adaptive Code Review"
+  short_description: "Focused reviews with measured model profiles"
+  default_prompt: "Use $code-review-c to review this branch against its base."

@@ -1,0 +1,9 @@
+{
+  "name": "code-review-c",
+  "version": "0.1.0",
+  "description": "Adaptive focused Codex reviews with measured model onboarding.",
+  "author": {"name": "Dmitry Kropachev"},
+  "license": "MIT",
+  "repository": "https://github.com/dk-code-factory/code-review-c",
+  "skills": "./codex/skills/"
+}
