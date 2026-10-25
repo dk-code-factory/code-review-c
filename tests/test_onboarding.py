@@ -82,6 +82,24 @@ class OnboardingTests(GitCase):
                 self.assertEqual((tree / "stamp.py").read_bytes(), b"$Format:%H$\n")
             self.assertTrue((tree / "tool.sh").stat().st_mode & 0o111)
 
+    def test_freeze_from_repository_subdirectory_preserves_full_pinned_trees(self):
+        spec = self.campaign_spec()
+        fixture = spec["fixtures"][0]
+        repo = Path(fixture["repo"])
+        nested = repo / "nested"
+        nested.mkdir()
+        fixture["repo"] = str(nested)
+        save(self.root / "spec.json", spec)
+        output = self.root / "nested-campaign"
+        campaign = onboarding.freeze(self.root / "spec.json", output)
+        for revision in ("base", "head"):
+            tree = output / "fixtures/train0/workspace" / revision
+            self.assertEqual({p.name for p in tree.iterdir()}, {"context.py", "f0.py"})
+            for name in ("context.py", "f0.py"):
+                expected = subprocess.check_output(["git", "-C", str(repo), "show", fixture[revision] + ":" + name])
+                self.assertEqual((tree / name).read_bytes(), expected)
+        self.assertEqual(onboarding.read(output), campaign)
+
     def test_archive_rejects_symlinks(self):
         (self.repo / "link").symlink_to("a.py")
         revision = commit(self.repo)
@@ -160,6 +178,38 @@ class OnboardingTests(GitCase):
             target.rename(workspace)
         self.assertEqual(onboarding.read(self.croot), campaign)
 
+    def test_frozen_tree_directory_additions_and_removals_rejected(self):
+        spec = self.campaign_spec()
+        fixture = spec["fixtures"][0]
+        repo = Path(fixture["repo"])
+        git(repo, "rm", "-r", "--", ".")
+        fixture["base"] = commit(repo)
+        (repo / "f0.py").write_text("def f0():\n    return 1\n")
+        fixture["head"] = commit(repo)
+        fixture["evidence"] = []
+        save(self.root / "spec.json", spec)
+        output = self.root / "first-file"
+        campaign = onboarding.freeze(self.root / "spec.json", output)
+        workspace = output / "fixtures/train0/workspace"
+        self.assertFalse(any((workspace / "base").iterdir()))
+        self.assertEqual(onboarding.read(output), campaign)
+        for change in ("remove-base", "add-empty"):
+            with self.subTest(change=change):
+                path = workspace / ("base" if change == "remove-base" else "added-empty")
+                if change == "remove-base":
+                    path.rmdir()
+                else:
+                    path.mkdir()
+                try:
+                    with self.assertRaisesRegex(ValueError, "fixture trees changed"):
+                        onboarding.read(output)
+                finally:
+                    if change == "remove-base":
+                        path.mkdir()
+                    else:
+                        path.rmdir()
+                self.assertEqual(onboarding.read(output), campaign)
+
     def test_freeze_rejects_invalid_host_input_reservations(self):
         spec = self.campaign_spec()
         for index, value in enumerate((-1, True, 1.5, "8000", None)):
@@ -196,12 +246,22 @@ class OnboardingTests(GitCase):
         self.assertEqual([f["languages"] for f in campaign["fixtures"]], [["python"], ["go"]])
         self.assertEqual(campaign["scope"]["languages"], ["go", "python"])
 
-    def test_gold_and_prompt_drift_rejected(self):
+    def test_gold_key_drift_rejected(self):
         self.freeze()
         path = self.croot / "grading/keys.json"
         path.write_text("{}")
         with self.assertRaisesRegex(ValueError, "answer keys changed"):
             onboarding.read(self.croot)
+
+    def test_frozen_prompt_drift_rejected_independently(self):
+        campaign = self.freeze()
+        path = self.croot / campaign["fixtures"][0]["prompts"]["focused"]["ref"]
+        original = path.read_bytes()
+        path.write_bytes(original + b"\nChanged prompt\n")
+        with self.assertRaisesRegex(ValueError, "fixture prompt changed"):
+            onboarding.read(self.croot)
+        path.write_bytes(original)
+        self.assertEqual(onboarding.read(self.croot), campaign)
 
     def test_missing_measurements_block_promotion(self):
         self.freeze()
@@ -350,6 +410,30 @@ class OnboardingTests(GitCase):
         self.assertEqual(result["compatibility"], "historical only")
         self.assertFalse(onboarding.compare(self.croot)["qualifying"])
 
+    def test_incompatible_native_campaign_retained_only_as_history(self):
+        self.freeze()
+        for difference in ("instructions", "campaign"):
+            with self.subTest(difference=difference):
+                old = copy.deepcopy(self.c)
+                if difference == "instructions":
+                    old["identity"]["instruction_hash"] = "0" * 64
+                else:
+                    old["scope"]["domain"] = "generic"
+                old["id"] = digest({k: v for k, v in old.items() if k != "id"})
+                source = self.root / ("old-" + difference)
+                save(source / "campaign.json", old)
+                result = onboarding.import_evidence(self.croot, source, "native")
+                self.assertEqual(result["compatibility"], "historical only")
+                historical = load(self.croot / "historical" / (digest(old) + ".json"))
+                self.assertFalse(historical["compatible"])
+                self.assertEqual(historical["format"], "native")
+                self.assertEqual(historical["source"], str(source.resolve()))
+                self.assertEqual(historical["data"], old)
+                self.assertFalse((self.croot / "attempts").exists())
+        self.assertFalse(onboarding.compare(self.croot)["qualifying"])
+        with self.assertRaisesRegex(ValueError, "blocks promotion"):
+            onboarding.promote(self.croot, "focused", self.root / "profiles")
+
     def test_exact_native_import_reuses_without_model_calls(self):
         self.freeze()
         synthetic_trials(self.croot, self.c)
@@ -361,6 +445,19 @@ class OnboardingTests(GitCase):
         self.assertEqual(r["imported"], 6)
         with self.assertRaisesRegex(ValueError, "overwrite"):
             onboarding.import_evidence(copy_root, self.croot, "native")
+
+    def test_exact_native_import_rejects_corruption_without_historical_fallback(self):
+        self.freeze()
+        synthetic_trials(self.croot, self.c)
+        copy_root = self.root / "copy"
+        shutil.copytree(self.croot, copy_root)
+        shutil.rmtree(copy_root / "attempts")
+        prompt = self.croot / self.c["fixtures"][0]["prompts"]["focused"]["ref"]
+        prompt.write_bytes(prompt.read_bytes() + b"\nCorrupt exact-match source\n")
+        with self.assertRaisesRegex(ValueError, "fixture prompt changed"):
+            onboarding.import_evidence(copy_root, self.croot, "native")
+        self.assertFalse((copy_root / "attempts").exists())
+        self.assertFalse((copy_root / "historical").exists())
 
     def test_paid_runner_requires_explicit_limits_and_immutable_image(self):
         self.freeze()

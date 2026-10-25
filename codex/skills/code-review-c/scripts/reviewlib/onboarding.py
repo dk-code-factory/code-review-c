@@ -57,7 +57,7 @@ def prepare(output):
 
 def archive(repo, rev, destination):
     """Only regular files/directories; fixture links never expose host answer keys."""
-    entries = inventory.git(repo, "ls-tree", "-r", "-z", rev).split(b"\0")
+    entries = inventory.git(repo, "ls-tree", "--full-tree", "-r", "-z", rev).split(b"\0")
     files = []
     for entry in filter(None, entries):
         metadata, name = entry.split(b"\t", 1)
@@ -88,16 +88,18 @@ def tree_hash(root):
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise ValueError("fixture trees must contain only regular files and directories")
-    files = {}
+    entries = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
             raise ValueError("fixture trees must contain only regular files and directories")
         if path.is_file():
-            files[path.relative_to(root).as_posix()] = {"sha256": digest(path.read_bytes()),
-                                                       "executable": path.stat().st_mode & 0o111}
-        elif not path.is_dir():
+            entries[path.relative_to(root).as_posix()] = {"sha256": digest(path.read_bytes()),
+                                                         "executable": path.stat().st_mode & 0o111}
+        elif path.is_dir():
+            entries[path.relative_to(root).as_posix()] = {"type": "directory"}
+        else:
             raise ValueError("fixture trees must contain only regular files and directories")
-    return digest(files)
+    return digest(entries)
 
 
 def freeze(spec_path, output):
@@ -523,8 +525,9 @@ def import_evidence(root, source, format_name):
     c = read(root)
     source = Path(source)
     if format_name == "native":
-        old = read(source)
+        old = load(source / "campaign.json", "campaign")
         if old["id"] == c["id"]:
+            read(source)
             imported = 0
             for attempt in sorted((source / "attempts").iterdir()):
                 target = Path(root) / "attempts" / attempt.name
