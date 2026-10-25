@@ -2,7 +2,7 @@
 
 ## Supported environment and installation
 
-The first-release support target is Linux with CPython 3.11–3.14, Git, and a Codex
+The first-release support target is Linux with CPython 3.11–3.15, Git, and a Codex
 host providing native agents. GitHub PR pinning additionally requires authenticated
 `gh`. Container trials require a working Linux Docker engine and an immutable image
 containing the selected Codex version. Review and preview do not need Docker.

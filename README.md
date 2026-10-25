@@ -27,7 +27,7 @@ in Codex and request:
 - “Preview a strategy for base REV and head REV.”
 - “Prepare model onboarding; do not run trials.”
 
-Linux is the first-release support target. CI covers CPython 3.11–3.14; other
+Linux is the first-release support target. CI covers CPython 3.11–3.15; other
 platforms and Python versions are unverified. Git and native Codex agents support
 review/preview; authenticated `gh` supports GitHub PR pinning. Docker is needed
 only for isolated onboarding trials and container integration checks. Models and effort inherit the host selection. A missing or
