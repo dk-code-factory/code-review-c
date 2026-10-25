@@ -1,7 +1,6 @@
 # code-review-c
 
-Standalone adaptive Codex review skill. Version 0.1.0, MIT licensed. The implementation
-lives on `feat/adaptive-review-controller`; `main` contains the public scaffold.
+Standalone adaptive Codex review skill. Version 0.1.0, MIT licensed.
 
 Review quality comes first. Initial workload limits are provisional, not measured
 model capacities. The first release supplies onboarding tools and runs no paid
@@ -9,17 +8,29 @@ calibration campaigns.
 
 ## Use
 
-Check out the feature branch and copy `codex/skills/code-review-c` into your Codex
-skills directory, or add this checkout as a local Codex plugin marketplace. The
-package contains exactly one skill, `code-review-c`. It needs no sibling checkout,
-external review plugin, or build step. Select it in Codex and request:
+Install the stable `v0.1.0` tag into your Codex skills directory:
+
+```sh
+git clone --branch v0.1.0 --depth 1 https://github.com/dk-code-factory/code-review-c.git
+skill_parent="${CODEX_HOME:-$HOME/.codex}/skills"
+mkdir -p "$skill_parent"
+test ! -e "$skill_parent/code-review-c" && cp -R code-review-c/codex/skills/code-review-c "$skill_parent/"
+```
+
+If that skill already exists, move the old directory aside before installing;
+keep it for rollback. Alternatively, add the tagged checkout as a local Codex
+plugin marketplace. The package contains exactly one skill, `code-review-c`.
+It needs no sibling checkout, external review plugin, or build step. Select it
+in Codex and request:
 
 - “Review PR URL with code-review-c.”
 - “Preview a strategy for base REV and head REV.”
 - “Prepare model onboarding; do not run trials.”
 
-Python 3.11+, Git and native Codex agents support review/preview; authenticated `gh`
-supports PR pinning. Models and effort inherit the host selection. A missing or
+Linux is the first-release support target. CI covers CPython 3.11–3.14; other
+platforms and Python versions are unverified. Git and native Codex agents support
+review/preview; authenticated `gh` supports GitHub PR pinning. Docker is needed
+only for isolated onboarding trials and container integration checks. Models and effort inherit the host selection. A missing or
 incompatible profile uses a provisional 58,000-byte total visible-input budget.
 No measured profiles are distributed. Binary, submodule and type changes remain
 explicit gaps requiring separate inspection; indivisible oversized hunks also remain
@@ -34,7 +45,8 @@ improvements open only after complete, verified, clean essential coverage.
 Read the [skill](codex/skills/code-review-c/SKILL.md),
 [controller procedure](codex/skills/code-review-c/references/controller.md),
 [record contracts](codex/skills/code-review-c/references/contracts.md), and
-[onboarding procedure](codex/skills/code-review-c/references/onboarding.md).
+[onboarding procedure](codex/skills/code-review-c/references/onboarding.md), and
+[operating guide](codex/skills/code-review-c/references/operations.md).
 
 ## Development
 
@@ -54,5 +66,5 @@ critical-defect recall, precision and completion gates precede profile promotion
 Keep review artifacts, campaign data, local profiles, credentials, private rules,
 caches and benchmark results outside the package and reviewed repository. Provenance
 for adapted review guidance is pinned in [PROVENANCE.json](PROVENANCE.json), with
-upstream license notices retained in [NOTICE](NOTICE). This scaffold does not change
+upstream license notices retained in [NOTICE](NOTICE). This package does not change
 the source `code-review-ad` repository or its configured reviewers.
