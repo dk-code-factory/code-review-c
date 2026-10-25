@@ -169,17 +169,20 @@ class OnboardingTests(GitCase):
         with self.assertRaisesRegex(ValueError, "combined controls"):
             onboarding.promote(self.croot, "combined", self.root / "profiles")
 
-    def fake_runner(self, timeout=False):
+    def fake_runner(self, timeout=False, interrupt=False):
         config = self.root / "host.toml"
         config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
         auth = self.root / "auth.json"
         auth.write_text('{"synthetic": true}')
         calls = []
+        cleanups = []
 
         def run(command, **kwargs):
             if command[1] == "rm":
+                cleanups.append(command)
                 return subprocess.CompletedProcess(command, 0)
             calls.append(command)
+            self.assertIn("--interactive", command)
             self.assertIn("--ephemeral", command)
             self.assertIn("read-only", command)
             self.assertNotIn("--model", command)
@@ -190,6 +193,8 @@ class OnboardingTests(GitCase):
             prompt = kwargs["input"].decode()
             self.assertIn("REMAINING_VISIBLE_BYTES=", prompt)
             kwargs["stdout"].write((json.dumps({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 20}}) + "\n").encode())
+            if interrupt:
+                raise KeyboardInterrupt
             if timeout:
                 raise subprocess.TimeoutExpired(command, 0.01)
             save(Path(output) / "result.json", record("calibration-result", status="incomplete", inspected_hunks=[], extra_visible_bytes=0, findings=[], gaps=["Synthetic run"]))
@@ -198,7 +203,10 @@ class OnboardingTests(GitCase):
         with patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
              patch.object(onboarding.subprocess, "check_output", return_value="codex-cli synthetic\n"), \
              patch.object(onboarding.subprocess, "run", side_effect=run):
-            result = onboarding.run(self.croot, "example/codex@sha256:" + "a" * 64, config, auth, 1, 10, 5)
+            try:
+                result = onboarding.run(self.croot, "example/codex@sha256:" + "a" * 64, config, auth, 1, 10, 5)
+            finally:
+                self.assertEqual(len(cleanups), 1)
         self.assertEqual(result["launched"], 1)
         self.assertEqual(len(calls), 1)
         return load(self.croot / "attempts/train0--focused--0/receipt.json")
@@ -217,6 +225,14 @@ class OnboardingTests(GitCase):
         self.assertEqual(receipt["status"], "timeout")
         self.assertTrue(receipt["launched"])
         self.assertIsNone(receipt["result_hash"])
+
+    def test_runner_interrupt_retains_interrupted_attempt(self):
+        self.freeze()
+        with self.assertRaises(KeyboardInterrupt):
+            self.fake_runner(interrupt=True)
+        receipt = load(self.croot / "attempts/train0--focused--0/receipt.json")
+        self.assertEqual(receipt["status"], "interrupted")
+        self.assertTrue(receipt["launched"])
 
     def test_answer_key_and_scope_identifiers_cannot_collide(self):
         spec = self.campaign_spec()

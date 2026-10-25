@@ -259,7 +259,7 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
                     shutil.copyfile(local_ref(root, prompt["ref"]), temp / "input" / "prompt.txt")
                     shutil.copyfile(schema, temp / "input" / "schema.json")
                     container = "crc-" + digest(str(trial))[:20]
-                    command = ["docker", "run", "--rm", "--name", container, "--entrypoint", "codex",
+                    command = ["docker", "run", "--rm", "--interactive", "--name", container, "--entrypoint", "codex",
                         "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only",
                         "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m", "--user", f"{os.getuid()}:{os.getgid()}",
                         "-e", "CODEX_HOME=/codex-home", "-e", "HOME=/tmp",
@@ -280,6 +280,9 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
                             result = subprocess.run(command, input=(temp / "input" / "prompt.txt").read_bytes(),
                                                     stdout=stdout, stderr=stderr, timeout=timeout)
                         receipt["status"] = "finished" if result.returncode == 0 else "failed"
+                    except KeyboardInterrupt:
+                        receipt["status"] = "interrupted"
+                        raise
                     except subprocess.TimeoutExpired:
                         receipt["status"] = "timeout"
                     except OSError as error:
