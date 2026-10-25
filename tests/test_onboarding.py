@@ -88,6 +88,56 @@ class OnboardingTests(GitCase):
         with self.assertRaises(ValueError):
             onboarding.promote(self.croot, "focused", self.root / "profiles")
 
+    def test_interrupted_attempt_keeps_reserved_campaign_time_on_resume(self):
+        spec = self.campaign_spec()
+        spec["limits"]["max_wall_seconds"] = 10
+        save(self.root / "spec.json", spec)
+        campaign = self.root / "campaign"
+        onboarding.freeze(self.root / "spec.json", campaign)
+        receipt = campaign / "attempts/train0--focused--0/receipt.json"
+        config = self.root / "host.toml"
+        config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
+        def cleanup_only(command, **kwargs):
+            self.assertEqual(command[:2], ["docker", "rm"], "No remaining trial time")
+            return subprocess.CompletedProcess(command, 0)
+        for status, reserved, elapsed in (("interrupted", 10, 1), ("cleanup-failed", 10, 1),
+                                          ("cleanup-failed", 1, 10)):
+            with self.subTest(status=status, reserved=reserved, elapsed=elapsed):
+                save(receipt, record("trial-receipt", status=status, launched=True,
+                                     reserved_seconds=reserved, elapsed_seconds=elapsed))
+                before = receipt.read_bytes()
+                with patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
+                     patch.object(onboarding.subprocess, "check_output", return_value="codex-cli synthetic\n"), \
+                     patch.object(onboarding.subprocess, "run", side_effect=cleanup_only):
+                    result = onboarding.run(campaign, "sha256:" + "a" * 64, config, "unused", 1, 10, 5)
+                self.assertEqual(result["launched"], 0)
+                self.assertEqual(receipt.read_bytes(), before)
+
+    def test_version_probe_cleanup_and_failure_visibility(self):
+        self.freeze()
+        config = self.root / "host.toml"
+        config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
+        for failure in (subprocess.TimeoutExpired(["docker"], 30), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
+                     patch.object(onboarding.subprocess, "check_output", side_effect=failure) as probe, \
+                     patch.object(onboarding.subprocess, "run") as cleanup:
+                    with self.assertRaises(type(failure)):
+                        onboarding.run(self.croot, "sha256:" + "a" * 64, config, "unused", 1, 10, 5)
+                command = probe.call_args.args[0]
+                name = command[command.index("--name") + 1]
+                self.assertTrue(name.startswith("crc-version-"))
+                cleanup.assert_called_once_with(["docker", "rm", "-f", name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=15)
+        def removal_failure(command, **kwargs):
+            raise subprocess.CalledProcessError(1, command, stderr=b"Synthetic removal failure")
+        with patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
+             patch.object(onboarding.subprocess, "check_output", return_value="codex-cli synthetic\n"), \
+             patch.object(onboarding.subprocess, "run", side_effect=removal_failure):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                onboarding.run(self.croot, "sha256:" + "a" * 64, config, "unused", 1, 10, 5)
+        self.assertIn("crc-version-", str(raised.exception))
+
     def test_critical_miss_and_false_positive_preserved(self):
         self.freeze(full=True)
         synthetic_trials(self.croot, self.c)
@@ -181,6 +231,7 @@ class OnboardingTests(GitCase):
                 return subprocess.CompletedProcess(command, 0)
             calls.append(command)
             self.assertIn("--ephemeral", command)
+            self.assertIn("--interactive", command)
             self.assertIn("read-only", command)
             self.assertNotIn("--model", command)
             self.assertNotIn("-m", command)

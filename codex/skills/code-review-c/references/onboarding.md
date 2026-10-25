@@ -26,9 +26,10 @@ storage. Preparation, freezing, grading, comparison, and promotion launch no mod
    Do not substitute a model or infer reviewer identity from the controller.
 4. Set explicit campaign limits: maximum model calls, total elapsed trial seconds,
    and per-trial seconds. Zero defaults prohibit execution. All started calls,
-   including failed and interrupted attempts, consume the call allowance. Elapsed
-   time of finished attempts and reserved time for interrupted attempts consume
-   the frozen time allowance. These are call/time limits, not a guaranteed dollar
+   including failed and interrupted attempts, consume the call allowance. Started,
+   interrupted and cleanup-failed attempts spend their reserved time or their
+   recorded elapsed time, whichever is larger. Other attempts spend recorded
+   elapsed time. These consume the frozen time allowance, not a guaranteed dollar
    or token cap; no token price assumptions are made.
 5. Freeze with `HELPER onboard freeze --spec SPEC --out CAMPAIGN`. Frozen source
    trees, prompt hashes, identity, limits and gold keys are immutable. If a fixture,
@@ -63,12 +64,18 @@ keep all other evidence identical within each matched trial.
 
 Provide an immutable Docker image (`IMAGE@sha256:...`) containing the desired Codex
 version and its runtime dependencies, with `codex` on PATH and no custom entrypoint.
+An exact local image ID (`sha256:...`, as returned by `docker build --iidfile`)
+is also accepted. Tags alone are mutable and rejected.
 Provide a sanitized host config containing **only** `model` and
 `model_reasoning_effort`, matching the frozen host-selected identity. The harness
 does not invent candidate overrides. Provide the existing host's `auth.json`; it
 is copied into an ephemeral private home and removed on exit. API-key or custom
 provider setups need an audited equivalent image/auth adapter; this runner supports
 normal Codex auth.json login. Do not mount the host's full Codex home.
+
+The version check runs in its own `crc-version-*` container. Timeout and SIGINT
+also attempt bounded removal; a removal failure makes the command fail and needs
+the recovery steps below.
 
 After explicitly authorizing model calls with limits, run:
 
@@ -90,8 +97,15 @@ with a structured calibration output schema. No child agents are permitted. The
 runner captures traces, stderr, structured findings, timing, usage, and input hashes.
 It executes serially to make matched latency easier to assess. Explicit limits stop
 new launches, timeouts remove containers, and existing attempts are never overwritten.
-An interrupted `started` receipt remains incomplete; preserve it. No automatic retry
-turns a failed attempt into a passing one. Start a fresh campaign for replacement trials.
+An interrupted receipt remains incomplete; preserve it. SIGINT records `interrupted`
+when removal succeeds. Removal errors or timeouts record `cleanup-failed` and can
+leave a container running; abrupt process loss can leave `started`.
+Use `docker ps -a --filter name=crc-` and `docker inspect NAME` to identify the
+affected container. Trial mounts identify its campaign. Version probes have
+`crc-version-*` names; compare their pinned image and any name in the command error.
+Remove only the affected container with
+`docker rm -f NAME` before continuing. Preserve receipts. No automatic retry turns
+a failed attempt into a passing one. Start a fresh campaign for replacement trials.
 
 ## Grade, compare, promote
 
