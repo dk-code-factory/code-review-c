@@ -4,7 +4,7 @@ import subprocess
 from unittest.mock import patch
 
 from support import GitCase, SKILL, commit, git, identity, rehash
-from reviewlib import inventory, planner, profiles
+from reviewlib import inventory, planner, profiles, results
 from reviewlib.records import digest, external, save
 
 
@@ -58,6 +58,49 @@ class InventoryTests(GitCase):
             data = (self.bundle / h["ref"]).read_bytes()
             self.assertEqual((len(data), digest(data)), (h["bytes"], h["sha256"]))
         self.assertEqual(inv["files"][0]["added"], 2)
+
+    def test_submodule_settings_cannot_hide_changed_gitlinks(self):
+        git(self.repo, "update-index", "--add", "--cacheinfo", "160000," + self.base + ",dependency")
+        git(self.repo, "commit", "-m", "Add gitlink")
+        base = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-index", "--cacheinfo", "160000," + self.head + ",dependency")
+        git(self.repo, "commit", "-m", "Change gitlink")
+        head = git(self.repo, "rev-parse", "HEAD")
+        for ignore in ("all", "dirty", "untracked", "none"):
+            for display in ("short", "log", "diff"):
+                with self.subTest(ignore=ignore, display=display):
+                    git(self.repo, "config", "diff.ignoreSubmodules", ignore)
+                    git(self.repo, "config", "diff.submodule", display)
+                    bundle = self.root / (ignore + "-" + display)
+                    inv = inventory.build(self.repo, bundle, base, head)
+                    self.assertEqual([f["path"] for f in inv["files"]], ["dependency"])
+                    self.assertTrue(inv["hunks"][0]["opaque"])
+                    plan = planner.build(bundle)
+                    report = results.report(plan, [], None)
+                    self.assertEqual(report["gate"], "blocked")
+                    self.assertEqual(len(report["coverage_gaps"]), len(planner.ESSENTIAL))
+
+    def test_renamed_gitlink_remains_an_opaque_gap(self):
+        git(self.repo, "update-index", "--add", "--cacheinfo", "160000," + self.base + ",old-dependency")
+        git(self.repo, "commit", "-m", "Add gitlink")
+        base = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-index", "--force-remove", "old-dependency")
+        git(self.repo, "update-index", "--add", "--cacheinfo", "160000," + self.base + ",new-dependency")
+        git(self.repo, "commit", "-m", "Rename gitlink")
+        head = git(self.repo, "rev-parse", "HEAD")
+        inv = inventory.build(self.repo, self.bundle, base, head)
+        self.assertEqual(inv["files"][0]["status"], "R100")
+        self.assertTrue(inv["hunks"][0]["opaque"])
+        self.assertEqual(results.report(planner.build(self.bundle), [], None)["gate"], "blocked")
+
+    def test_type_change_remains_an_opaque_gap(self):
+        (self.repo / "a.py").unlink()
+        (self.repo / "a.py").symlink_to("target.py")
+        head = commit(self.repo)
+        inv = inventory.build(self.repo, self.bundle, self.base, head)
+        self.assertEqual(inv["files"][0]["status"], "T")
+        self.assertTrue(all(h["opaque"] for h in inv["hunks"]))
+        self.assertEqual(results.report(planner.build(self.bundle), [], None)["gate"], "blocked")
 
     def test_corrupt_pinned_patch_fails(self):
         inv = self.inventory()
