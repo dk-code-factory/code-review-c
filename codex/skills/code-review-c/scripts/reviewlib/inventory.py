@@ -11,6 +11,8 @@ LANGUAGES = {".py": "python", ".js": "javascript", ".jsx": "javascript",
              ".php": "php", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp",
              ".cxx": "cpp", ".hh": "cpp", ".hpp": "cpp", ".rs": "rust"}
 HUNK = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*$", re.M)
+DIFF_OPTIONS = ("--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
+                "--ignore-submodules=none", "--submodule=short", "--find-renames")
 
 
 def git(repo, *args):
@@ -58,16 +60,17 @@ def build(repo, output, base=None, head=None, pr=None):
         raise ValueError("explicit base and head revisions are required")
     base, head = revision(repo, base), revision(repo, head)
     diff_base = git(repo, "merge-base", base, head).decode().strip() if pr else base
-    fields = git(repo, "diff", "--name-status", "-z", "--find-renames", diff_base, head, "--").split(b"\0")
+    fields = git(repo, "diff", *DIFF_OPTIONS, "--raw", "--no-abbrev", "-z",
+                 diff_base, head, "--").split(b"\0")
     files, hunks = [], []
     while fields and fields[0]:
-        status = fields.pop(0).decode("ascii")
+        old_mode, new_mode, _, _, status = fields.pop(0).decode("ascii").split()
+        old_mode = old_mode.removeprefix(":")
         old_raw = fields.pop(0)
         new_raw = fields.pop(0) if status[0] in "RC" else old_raw
         old, new = old_raw.decode("utf-8", "surrogateescape"), new_raw.decode("utf-8", "surrogateescape")
         paths = list(dict.fromkeys([old, new]))
-        patch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--binary",
-                    "--find-renames", "--unified=3", diff_base, head, "--",
+        patch = git(repo, "diff", *DIFF_OPTIONS, "--binary", "--unified=3", diff_base, head, "--",
                     *[":(literal)" + p for p in paths])
         matches = list(HUNK.finditer(patch))
         header = patch[:matches[0].start()] if matches else b""
@@ -92,7 +95,7 @@ def build(repo, output, base=None, head=None, pr=None):
                           "component": Path(new).parts[0] if len(Path(new).parts) > 1 else ".",
                           "bytes": len(data), "sha256": digest(data), "ref": ref,
                           "span": span, "binary": b"GIT binary patch\n" in data,
-                          "opaque": status[0] == "T" or b"Subproject commit " in data})
+                          "opaque": status[0] == "T" or "160000" in {old_mode, new_mode}})
             ids.append(hid)
         files.append({"path": new, "old_path": old, "status": status, "added": added,
                       "removed": removed, "patch_bytes": len(patch), "hunks": ids})
