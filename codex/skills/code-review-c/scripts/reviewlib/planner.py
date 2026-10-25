@@ -118,31 +118,39 @@ def build(bundle, analysis=None, identity=None, profile_dir=None, host_input_byt
             # Never combine languages speculatively; cross-language relationships get contract tasks.
             key = (component, h["language"], domain, aspect, digest(evidence))
             buckets.setdefault(key, {"hunks": [], "evidence": evidence})["hunks"].append(h["id"])
-    for (component, language, domain, aspect, _), group in sorted(buckets.items()):
-        profile = profiles.select(profile_dir, identity, [language], domain, aspect)
-        current = None
-        for hid in group["hunks"]:
-            if current is None:
-                current = _task(len(tasks), aspect, [language], domain, component, profile,
-                                host_input_bytes, group["evidence"])
-            trial = {**current, "hunks": [*current["hunks"], hid]}
-            _, accounting = render(trial, inv, bundle)
-            if fits(trial, accounting, by_id):
-                current = trial
-            else:
-                if current["hunks"]:
-                    tasks.append(current)
+    def pack(optional):
+        prerequisites = [t["id"] for t in tasks if t["stage"] == "essential"] if optional else []
+        for (component, language, domain, aspect, _), group in sorted(buckets.items()):
+            if (aspect in OPTIONAL) != optional:
+                continue
+            profile = profiles.select(profile_dir, identity, [language], domain, aspect)
+            current = None
+            for hid in group["hunks"]:
+                if current is None:
                     current = _task(len(tasks), aspect, [language], domain, component, profile,
                                     host_input_bytes, group["evidence"])
-                single = {**current, "hunks": [hid]}
-                _, accounting = render(single, inv, bundle)
-                if fits(single, accounting, by_id):
-                    current = single
+                    current["prerequisites"] = prerequisites
+                trial = {**current, "hunks": [*current["hunks"], hid]}
+                _, accounting = render(trial, inv, bundle)
+                if fits(trial, accounting, by_id):
+                    current = trial
                 else:
-                    gaps.append({"hunks": [hid], "aspects": [aspect],
-                                 "reason": "Indivisible hunk plus instructions/support exceeds measured or provisional budget."})
-        if current and current["hunks"]:
-            tasks.append(current)
+                    if current["hunks"]:
+                        tasks.append(current)
+                        current = _task(len(tasks), aspect, [language], domain, component, profile,
+                                        host_input_bytes, group["evidence"])
+                        current["prerequisites"] = prerequisites
+                    single = {**current, "hunks": [hid]}
+                    _, accounting = render(single, inv, bundle)
+                    if fits(single, accounting, by_id):
+                        current = single
+                    else:
+                        gaps.append({"hunks": [hid], "aspects": [aspect],
+                                     "reason": "Indivisible hunk plus instructions/support exceeds measured or provisional budget."})
+            if current and current["hunks"]:
+                tasks.append(current)
+
+    pack(False)
     for edge in analysis.get("interfaces", []):
         owned = edge["hunks"]
         if len(set(owned)) < 2 or set(owned) - by_id.keys() or not edge.get("reason") or not edge.get("evidence"):
@@ -159,10 +167,9 @@ def build(bundle, analysis=None, identity=None, profile_dir=None, host_input_byt
         else:
             gaps.append({"hunks": owned, "aspects": ["contracts"],
                          "reason": "Connected interface evidence exceeds budget."})
-    essential_ids = [t["id"] for t in tasks if t["stage"] == "essential"]
+    # Optional handoffs must include the final essential dependency list while packing.
+    pack(True)
     for t in tasks:
-        if t["stage"] == "optional":
-            t["prerequisites"] = essential_ids
         prompt, t["bytes"] = render(t, inv, bundle)
         t["input_hash"] = digest(prompt.encode())
     plan = record("review-plan", inventory_id=inv["id"], base=inv["base"], head=inv["head"],
