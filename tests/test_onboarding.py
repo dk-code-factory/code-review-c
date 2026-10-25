@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -107,6 +108,57 @@ class OnboardingTests(GitCase):
                     onboarding.read(output)
                 path.chmod(0o755)
                 self.assertEqual(onboarding.read(output), campaign)
+
+    def test_frozen_tree_rejects_same_content_file_symlink(self):
+        campaign = self.freeze()
+        self.assertEqual(onboarding.read(self.croot), campaign)
+        path = self.croot / "fixtures/train0/workspace/head/f0.py"
+        target = self.root / "external.py"
+        shutil.copy2(path, target)
+        path.unlink()
+        path.symlink_to(target)
+        try:
+            with self.assertRaisesRegex(ValueError, "regular files and directories"):
+                onboarding.read(self.croot)
+        finally:
+            path.unlink()
+            shutil.copy2(target, path)
+        self.assertEqual(onboarding.read(self.croot), campaign)
+
+    def test_frozen_tree_rejects_unsupported_extra_nodes(self):
+        campaign = self.freeze()
+        workspace = self.croot / "fixtures/train0/workspace"
+        target = self.root / "external-directory"
+        target.mkdir()
+        for kind in ("directory-symlink", "dangling-symlink", "fifo"):
+            with self.subTest(kind=kind):
+                node = workspace / "unsupported"
+                if kind == "directory-symlink":
+                    node.symlink_to(target, target_is_directory=True)
+                elif kind == "dangling-symlink":
+                    node.symlink_to(self.root / "missing")
+                else:
+                    os.mkfifo(node)
+                try:
+                    with self.assertRaisesRegex(ValueError, "regular files and directories"):
+                        onboarding.read(self.croot)
+                finally:
+                    node.unlink()
+                self.assertEqual(onboarding.read(self.croot), campaign)
+
+    def test_frozen_workspace_root_symlink_rejected(self):
+        campaign = self.freeze()
+        workspace = self.croot / "fixtures/train0/workspace"
+        target = self.root / "saved-workspace"
+        workspace.rename(target)
+        workspace.symlink_to(target, target_is_directory=True)
+        try:
+            with self.assertRaisesRegex(ValueError, "regular files and directories"):
+                onboarding.read(self.croot)
+        finally:
+            workspace.unlink()
+            target.rename(workspace)
+        self.assertEqual(onboarding.read(self.croot), campaign)
 
     def test_freeze_rejects_invalid_host_input_reservations(self):
         spec = self.campaign_spec()

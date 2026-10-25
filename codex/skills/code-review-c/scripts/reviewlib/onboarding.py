@@ -86,9 +86,18 @@ def archive(repo, rev, destination):
 
 def tree_hash(root):
     root = Path(root)
-    return digest({p.relative_to(root).as_posix(): {"sha256": digest(p.read_bytes()),
-                                                  "executable": p.stat().st_mode & 0o111}
-                   for p in sorted(root.rglob("*")) if p.is_file()})
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("fixture trees must contain only regular files and directories")
+    files = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("fixture trees must contain only regular files and directories")
+        if path.is_file():
+            files[path.relative_to(root).as_posix()] = {"sha256": digest(path.read_bytes()),
+                                                       "executable": path.stat().st_mode & 0o111}
+        elif not path.is_dir():
+            raise ValueError("fixture trees must contain only regular files and directories")
+    return digest(files)
 
 
 def freeze(spec_path, output):
