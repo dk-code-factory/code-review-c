@@ -76,7 +76,15 @@ Use only explicitly authorized call/time limits. Every started call consumes its
 allowance, including failures and interruptions. SIGINT attempts container cleanup
 and records an interrupted attempt. Abrupt process loss can leave a `started`
 receipt and an orphaned container. Preserve the receipt and reserve its recorded
-time when resuming; never delete attempts to reclaim an allowance.
+time when resuming; never delete attempts to reclaim an allowance. Started,
+interrupted, and cleanup-failed attempts charge the larger of reserved and actual
+elapsed time. Ordinary completed attempts charge actual elapsed time.
+
+The preliminary version probe prints its unique `crc-version-` container name to
+stderr before launch and attempts bounded cleanup on every exit. If cleanup fails
+or the runner is lost, verify the runner has stopped, inspect that exact printed
+container, and remove it with `docker rm -f EXACT_CONTAINER_NAME`. Version probes
+have no trial receipt and launch no model calls.
 
 Before recovery, verify the original runner has stopped. Its container name is
 `crc-` followed by the first 20 hexadecimal characters of SHA-256 of the canonical

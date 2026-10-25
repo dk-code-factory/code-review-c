@@ -54,6 +54,60 @@ class OnboardingTests(GitCase):
         with self.assertRaisesRegex(ValueError, "submodule"):
             onboarding.freeze(self.root / "spec.json", self.root / "bad")
 
+    def test_freeze_preserves_raw_files_despite_export_attributes(self):
+        spec = self.campaign_spec()
+        fixture = spec["fixtures"][0]
+        repo = Path(fixture["repo"])
+        name = "dependencies/odd\nname-\udcff.bin"
+        for revision in ("base", "head"):
+            git(repo, "checkout", "--detach", fixture[revision])
+            (repo / ".gitattributes").write_text("dependencies export-ignore\nstamp.py export-subst\n")
+            (repo / name).parent.mkdir(exist_ok=True)
+            (repo / name).write_bytes(b"\x00\xffraw dependency\n")
+            (repo / "stamp.py").write_bytes(b"$Format:%H$\n")
+            (repo / "tool.sh").write_text("#!/bin/sh\nexit 0\n")
+            (repo / "tool.sh").chmod(0o755)
+            fixture[revision] = commit(repo)
+        fixture["evidence"][0]["revision"] = fixture["head"]
+        save(self.root / "spec.json", spec)
+        output = self.root / "attributed"
+        onboarding.freeze(self.root / "spec.json", output)
+        for revision in ("base", "head"):
+            tree = output / "fixtures/train0/workspace" / revision
+            with self.subTest(revision=revision, attribute="export-ignore"):
+                self.assertTrue((tree / name).is_file())
+                self.assertEqual((tree / name).read_bytes(), b"\x00\xffraw dependency\n")
+            with self.subTest(revision=revision, attribute="export-subst"):
+                self.assertEqual((tree / "stamp.py").read_bytes(), b"$Format:%H$\n")
+            self.assertTrue((tree / "tool.sh").stat().st_mode & 0o111)
+
+    def test_archive_rejects_symlinks(self):
+        (self.repo / "link").symlink_to("a.py")
+        revision = commit(self.repo)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            onboarding.archive(self.repo, revision, self.root / "linked")
+
+    def test_frozen_tree_executable_mode_drift_rejected(self):
+        spec = self.campaign_spec()
+        fixture = spec["fixtures"][0]
+        repo = Path(fixture["repo"])
+        for revision in ("base", "head"):
+            git(repo, "checkout", "--detach", fixture[revision])
+            (repo / "f0.py").chmod(0o755)
+            fixture[revision] = commit(repo)
+        fixture["evidence"][0]["revision"] = fixture["head"]
+        save(self.root / "spec.json", spec)
+        output = self.root / "executable"
+        campaign = onboarding.freeze(self.root / "spec.json", output)
+        path = output / "fixtures/train0/workspace/head/f0.py"
+        for mode in (0o655, 0o644):
+            with self.subTest(mode=oct(mode)):
+                path.chmod(mode)
+                with self.assertRaisesRegex(ValueError, "fixture trees changed"):
+                    onboarding.read(output)
+                path.chmod(0o755)
+                self.assertEqual(onboarding.read(output), campaign)
+
     def test_freeze_rejects_invalid_host_input_reservations(self):
         spec = self.campaign_spec()
         for index, value in enumerate((-1, True, 1.5, "8000", None)):
@@ -129,6 +183,16 @@ class OnboardingTests(GitCase):
         self.assertEqual(profiles.select(self.root / "profiles", mismatch, ["python"], "backend", "correctness")["id"], "provisional")
         (self.root / "profiles" / p["evidence"]["report"]).write_text("{}")
         self.assertEqual(profiles.select(self.root / "profiles", identity(), ["python"], "backend", "correctness")["id"], "provisional")
+
+    def test_promotion_rejects_output_inside_every_fixture_repository(self):
+        self.freeze(full=True)
+        synthetic_trials(self.croot, self.c)
+        for fixture in load(self.root / "spec.json")["fixtures"]:
+            with self.subTest(fixture=fixture["id"]):
+                output = Path(fixture["repo"]) / "private-profiles"
+                with self.assertRaisesRegex(ValueError, "outside repository/package"):
+                    onboarding.promote(self.croot, "focused", output)
+                self.assertFalse(output.exists())
 
     def test_three_matched_repetitions_mandatory(self):
         self.freeze(full=True)
@@ -259,7 +323,7 @@ class OnboardingTests(GitCase):
         with self.assertRaisesRegex(ValueError, "combined controls"):
             onboarding.promote(self.croot, "combined", self.root / "profiles")
 
-    def fake_runner(self, timeout=False, interrupt=False):
+    def fake_runner(self, timeout=False, interrupt=False, expected_launches=1):
         config = self.root / "host.toml"
         config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
         auth = self.root / "auth.json"
@@ -296,9 +360,9 @@ class OnboardingTests(GitCase):
             try:
                 result = onboarding.run(self.croot, "example/codex@sha256:" + "a" * 64, config, auth, 1, 10, 5)
             finally:
-                self.assertEqual(len(cleanups), 1)
-        self.assertEqual(result["launched"], 1)
-        self.assertEqual(len(calls), 1)
+                self.assertEqual(len(cleanups), expected_launches + 1)
+        self.assertEqual(result["launched"], expected_launches)
+        self.assertEqual(len(calls), expected_launches)
         return load(self.croot / "attempts/train0--focused--0/receipt.json")
 
     def test_runner_captures_trace_and_enforces_call_limit_without_models(self):
@@ -323,6 +387,65 @@ class OnboardingTests(GitCase):
         receipt = load(self.croot / "attempts/train0--focused--0/receipt.json")
         self.assertEqual(receipt["status"], "interrupted")
         self.assertTrue(receipt["launched"])
+
+    def test_resume_preserves_uncertain_attempt_time_reservations(self):
+        self.freeze()
+        receipt = self.fake_runner()
+        path = self.croot / "attempts/train0--focused--0/receipt.json"
+        cases = [(status, reserved, elapsed, 0)
+                 for status in ("started", "interrupted", "cleanup-failed")
+                 for reserved, elapsed in ((10000, 1), (1, 10000))]
+        cases += [(status, 10000, 1, 1) for status in ("finished", "failed", "timeout")]
+        for status, reserved, elapsed, launches in cases:
+            with self.subTest(status=status, reserved=reserved, elapsed=elapsed):
+                shutil.rmtree(self.croot / "attempts")
+                retained = {**receipt, "status": status, "reserved_seconds": reserved, "elapsed_seconds": elapsed}
+                save(path, retained)
+                self.fake_runner(expected_launches=launches)
+                self.assertEqual(load(path), retained)
+
+    def test_version_probe_cleans_up_after_timeout_and_interrupt(self):
+        self.freeze()
+        config = self.root / "host.toml"
+        config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
+        for error in (subprocess.TimeoutExpired("docker", 30), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
+                 patch.object(onboarding.subprocess, "check_output", side_effect=error) as probe, \
+                 patch.object(onboarding.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as cleanup:
+                with self.assertRaises(type(error)):
+                    onboarding.run(self.croot, "example/codex@sha256:" + "a" * 64, config, "unused", 1, 10, 5)
+                cleanup.assert_called_once()
+                command = probe.call_args.args[0]
+                name = command[command.index("--name") + 1]
+                self.assertTrue(name.startswith("crc-version-"))
+                self.assertIn("--network=none", command)
+                cleanup.assert_called_once_with(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL, timeout=15)
+                self.assertFalse((self.croot / "attempts").exists())
+
+    def test_version_probe_cleanup_failure_reports_exact_container(self):
+        self.freeze()
+        config = self.root / "host.toml"
+        config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
+        auth = self.root / "auth.json"
+        auth.write_text('{"synthetic": true}')
+        names = []
+        for outcome in (subprocess.CompletedProcess([], 1), OSError("cleanup unavailable"), subprocess.TimeoutExpired("docker rm", 15)):
+            with self.subTest(outcome=type(outcome).__name__), \
+                 patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
+                 patch.object(onboarding.subprocess, "check_output", return_value="codex-cli synthetic\n") as probe, \
+                 patch.object(onboarding.subprocess, "run", side_effect=outcome if isinstance(outcome, BaseException) else None,
+                              return_value=outcome) as cleanup:
+                with self.assertRaisesRegex(ValueError, "cleanup failed.*crc-version-") as raised:
+                    onboarding.run(self.croot, "example/codex@sha256:" + "a" * 64, config, auth, 1, 10, 5)
+                command = probe.call_args.args[0]
+                name = command[command.index("--name") + 1]
+                names.append(name)
+                self.assertIn(name, str(raised.exception))
+                cleanup.assert_called_once()
+                self.assertFalse((self.croot / "attempts").exists())
+        self.assertEqual(len(set(names)), len(names))
 
     def test_answer_key_and_scope_identifiers_cannot_collide(self):
         spec = self.campaign_spec()

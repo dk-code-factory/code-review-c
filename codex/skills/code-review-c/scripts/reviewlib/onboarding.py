@@ -8,9 +8,10 @@ import os
 import re
 import shutil
 import subprocess
-import tarfile
+import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from . import inventory, planner
@@ -57,26 +58,36 @@ def prepare(output):
 def archive(repo, rev, destination):
     """Only regular files/directories; fixture links never expose host answer keys."""
     entries = inventory.git(repo, "ls-tree", "-r", "-z", rev).split(b"\0")
-    if any(entry.startswith(b"160000 ") for entry in entries):
-        raise ValueError("fixtures must not contain submodules")
-    raw = inventory.git(repo, "archive", "--format=tar", rev)
+    files = []
+    for entry in filter(None, entries):
+        metadata, name = entry.split(b"\t", 1)
+        mode, kind, oid = metadata.split()
+        if mode not in {b"100644", b"100755"} or kind != b"blob":
+            raise ValueError("fixtures must not contain symlinks, submodules, or special files")
+        files.append((mode, oid, name))
+    # Batch raw blobs so export attributes cannot omit or rewrite pinned files.
+    raw = subprocess.check_output(["git", "--no-pager", "-C", str(repo), "cat-file", "--batch"],
+                                  input=b"".join(oid + b"\n" for _, oid, _ in files), stderr=subprocess.PIPE)
+    blobs = io.BytesIO(raw)
     destination.mkdir(parents=True)
-    with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
-        for member in tar:
-            path = local_ref(destination, member.name)
-            if member.isdir():
-                path.mkdir(parents=True, exist_ok=True)
-            elif member.isfile():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(tar.extractfile(member).read())
-                path.chmod(0o755 if member.mode & 0o111 else 0o644)
-            else:
-                raise ValueError("fixtures must not contain symlinks, submodules, or special files")
+    for mode, oid, name in files:
+        header = blobs.readline().split()
+        if len(header) != 3 or header[:2] != [oid, b"blob"]:
+            raise ValueError("invalid pinned fixture blob")
+        size = int(header[2])
+        data = blobs.read(size)
+        if len(data) != size or blobs.read(1) != b"\n":
+            raise ValueError("incomplete pinned fixture blob")
+        path = local_ref(destination, os.fsdecode(name))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o755 if mode == b"100755" else 0o644)
 
 
 def tree_hash(root):
     root = Path(root)
-    return digest({p.relative_to(root).as_posix(): digest(p.read_bytes())
+    return digest({p.relative_to(root).as_posix(): {"sha256": digest(p.read_bytes()),
+                                                  "executable": p.stat().st_mode & 0o111}
                    for p in sorted(root.rglob("*")) if p.is_file()})
 
 
@@ -220,10 +231,11 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
         if type(value) is not int or value <= 0 or value > limits[key]:
             raise ValueError("explicit positive run limits must fit the frozen campaign")
     # A previously started trial still spends its call allowance after a crash.
-    attempts = list((root / "attempts").glob("*/receipt.json"))
-    used_calls = sum(bool(load(p).get("launched")) for p in attempts)
-    used_time = sum(load(p).get("reserved_seconds", trial_seconds) if load(p).get("status") == "started"
-                    else load(p).get("elapsed_seconds", trial_seconds) for p in attempts)
+    attempts = [load(p) for p in (root / "attempts").glob("*/receipt.json")]
+    used_calls = sum(bool(r.get("launched")) for r in attempts)
+    used_time = sum(max(r.get("reserved_seconds", trial_seconds), r.get("elapsed_seconds", trial_seconds))
+                    if r.get("status") in {"started", "interrupted", "cleanup-failed"}
+                    else r.get("elapsed_seconds", trial_seconds) for r in attempts)
     config = __import__("tomllib").loads(Path(host_config).read_text())
     if set(config) != {"model", "model_reasoning_effort"}:
         raise ValueError("provide a sanitized host config with exactly model and model_reasoning_effort")
@@ -231,7 +243,18 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
         raise ValueError("host-selected identity differs from frozen campaign")
     if not shutil.which("docker"):
         raise ValueError("Docker is required for isolated model trials")
-    version = subprocess.check_output(["docker", "run", "--rm", "--network=none", "--entrypoint", "codex", image, "--version"], text=True, timeout=30).strip()
+    probe = "crc-version-" + uuid.uuid4().hex
+    print("Version probe container: " + probe, file=sys.stderr, flush=True)
+    try:
+        version = subprocess.check_output(["docker", "run", "--rm", "--name", probe, "--network=none",
+                                           "--entrypoint", "codex", image, "--version"], text=True, timeout=30).strip()
+    finally:
+        try:
+            cleanup = subprocess.run(["docker", "rm", "-f", probe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            if cleanup.returncode:
+                raise ValueError("version probe cleanup failed; inspect and remove " + probe)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError("version probe cleanup failed; inspect and remove " + probe) from error
     if version != c["identity"]["codex_version"]:
         raise ValueError("container Codex version differs from frozen identity")
     schema = SKILL / "references" / "schemas" / "calibration-result.json"
@@ -463,8 +486,9 @@ def compare(root):
 
 
 def promote(root, strategy, output):
-    output = external(output)
     c = read(root)
+    repositories = [inventory.read(Path(root) / "fixtures" / f["id"] / "bundle")["repo"] for f in c["fixtures"]]
+    output = external(output, *repositories)
     report = compare(root)
     selected = next(s for s in report["strategies"] if s["id"] == strategy)
     if not report["qualifying"] or not selected["passing"]:
