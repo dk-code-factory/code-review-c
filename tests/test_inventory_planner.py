@@ -195,6 +195,57 @@ class PlanningTests(GitCase):
             aspects = [r["ref"] for r in t["instructions"] if "/aspects/" in r["ref"]]
             self.assertEqual(aspects, [f'references/aspects/{t["aspect"]}.md'])
 
+    def dependency_boundary(self, multiple_hunks=False, interface=False):
+        if multiple_hunks:
+            (self.repo / "a.py").write_text("\n".join(f"line{i}" for i in range(100)) + "\n")
+            self.base = commit(self.repo)
+            lines = (self.repo / "a.py").read_text().splitlines()
+            lines[3], lines[90] = "changed early", "changed late"
+            (self.repo / "a.py").write_text("\n".join(lines) + "\n")
+            self.head = commit(self.repo)
+        inv = self.inventory()
+        analysis = {"files": {"a.py": {"aspects": ["simplification"]}},
+                    "optional_reason": "Changed duplicate mapping"}
+        if interface:
+            analysis["interfaces"] = [{"hunks": [h["id"] for h in inv["hunks"]],
+                "reason": "Changed caller and callee contract",
+                "evidence": [{"revision": self.head, "path": "a.py", "start": 1, "end": 4}]}]
+        ordinary = planner.build(self.bundle, analysis)
+        task = copy.deepcopy(next(t for t in ordinary["tasks"] if t["stage"] == "optional"))
+        task["prerequisites"] = []
+        _, before = planner.render(task, inv, self.bundle)
+        limit = before["total"] + 1
+        select = profiles.select
+
+        def boundary_profile(directory, identity, languages, domain, aspect):
+            profile = select(directory, identity, languages, domain, aspect)
+            if aspect == "simplification":
+                profile["limits"]["total_visible_bytes"] = limit
+            return profile
+
+        with patch.object(profiles, "select", side_effect=boundary_profile):
+            plan = planner.build(self.bundle, analysis)
+            self.assertEqual(plan, planner.build(self.bundle, analysis))
+        planner.validate(plan, inv, self.bundle)
+        return plan, limit
+
+    def test_dependency_bytes_turn_indivisible_optional_hunk_into_gap(self):
+        plan, limit = self.dependency_boundary()
+        self.assertFalse(any(t["stage"] == "optional" for t in plan["tasks"]))
+        self.assertEqual([g["aspects"] for g in plan["gaps"]], [["simplification"]])
+        self.assertEqual(len(plan["tasks"]), len(planner.ESSENTIAL))
+
+    def test_dependency_bytes_split_optional_hunks_with_contract_dependency(self):
+        plan, limit = self.dependency_boundary(multiple_hunks=True, interface=True)
+        optional = [t for t in plan["tasks"] if t["stage"] == "optional"]
+        essential = {t["id"] for t in plan["tasks"] if t["stage"] == "essential"}
+        self.assertEqual(len(optional), 2)
+        self.assertFalse(plan["gaps"])
+        self.assertTrue(any(t["supplemental"] for t in plan["tasks"]))
+        for task in optional:
+            self.assertEqual(set(task["prerequisites"]), essential)
+            self.assertLessEqual(task["bytes"]["total"], limit)
+
     def test_unknown_paths_aspects_and_unpinned_context_fail(self):
         self.inventory()
         for analysis in ({"files": {"missing.py": {}}}, {"files": {"a.py": {"aspects": ["fashion"]}}},
