@@ -458,8 +458,10 @@ def compare(root):
 
 
 def promote(root, strategy, output):
-    output = external(output)
     c = read(root)
+    repositories = [inventory.read(Path(root) / "fixtures" / f["id"] / "bundle")["repo"]
+                    for f in c["fixtures"]]
+    output = external(output, *repositories)
     report = compare(root)
     selected = next(s for s in report["strategies"] if s["id"] == strategy)
     if not report["qualifying"] or not selected["passing"]:
@@ -476,8 +478,19 @@ def promote(root, strategy, output):
         limits=selected["measured_limits"], quality={k: selected["heldout"][k] for k in ("recall", "precision")},
         cost={"tokens": selected["heldout"]["tokens"], "latency_seconds": selected["heldout"]["latency_seconds"]},
         evidence={"report": report_ref, "sha256": digest(report), "campaign_id": c["id"]})
-    save(output / report_ref, report)
-    save(output / (profile["id"] + ".json"), profile)
+    report_path = local_ref(output, report_ref)
+    profile_path = local_ref(output, profile["id"] + ".json")
+    if report_path == profile_path:
+        raise ValueError("profile export destinations must be distinct")
+    for path in (report_path, profile_path):
+        external(path, *repositories)
+    output.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".profile-export-", dir=output) as temporary:
+        for name, path, value in (("report.json", report_path, report), ("profile.json", profile_path, profile)):
+            staged = Path(temporary) / name
+            save(staged, value)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            staged.replace(path)
     return profile
 
 

@@ -88,6 +88,68 @@ class OnboardingTests(GitCase):
         with self.assertRaises(ValueError):
             onboarding.promote(self.croot, "focused", self.root / "profiles")
 
+    def test_promotion_rejects_every_reviewed_repository_and_symlink_alias(self):
+        self.freeze(full=True)
+        synthetic_trials(self.croot, self.c)
+        # The later fixture ensures protection is not limited to the first repo.
+        repository = self.root / "heldout3"
+        alias = self.root / "fixture-alias"
+        alias.symlink_to(repository, target_is_directory=True)
+        for destination in (repository / "private-profiles", alias / "private-profiles"):
+            with self.subTest(destination=str(destination)):
+                with self.assertRaisesRegex(ValueError, "outside repository/package"):
+                    onboarding.promote(self.croot, "focused", destination)
+                self.assertFalse(destination.exists())
+        output = self.root / "external-profiles"
+        profile = onboarding.promote(self.croot, "focused", output)
+        self.assertTrue((output / (profile["id"] + ".json")).is_file())
+
+        report_ref = profile["evidence"]["report"]
+        profile_ref = profile["id"] + ".json"
+        for target in (repository, self.root / "other-private"):
+            target.mkdir(exist_ok=True)
+            for ref in (report_ref, profile_ref):
+                with self.subTest(target=str(target), ref=ref):
+                    destination = self.root / f"linked-{target.name}-{Path(ref).name}"
+                    link = destination / ref
+                    link.parent.mkdir(parents=True)
+                    protected = target / "private-export.json"
+                    link.symlink_to(protected)
+                    with self.assertRaisesRegex(ValueError, "artifact reference escapes bundle"):
+                        onboarding.promote(self.croot, "focused", destination)
+                    self.assertFalse(protected.exists())
+                    self.assertFalse((destination / report_ref).is_file())
+                    self.assertFalse((destination / profile_ref).is_file())
+
+        destination = self.root / "colliding-exports"
+        link = destination / report_ref
+        link.parent.mkdir(parents=True)
+        link.symlink_to(destination / profile_ref)
+        with self.assertRaisesRegex(ValueError, "destinations must be distinct"):
+            onboarding.promote(self.croot, "focused", destination)
+        self.assertFalse((destination / profile_ref).exists())
+
+    def test_promotion_ignores_linked_legacy_temporary_paths(self):
+        self.freeze(full=True)
+        synthetic_trials(self.croot, self.c)
+        profile = onboarding.promote(self.croot, "focused", self.root / "profiles")
+        protected = self.root / "heldout3/f0.py"
+        before = protected.read_bytes()
+        for kind in ("symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                destination = self.root / ("legacy-" + kind)
+                for ref in (profile["evidence"]["report"], profile["id"] + ".json"):
+                    legacy = destination / (ref + ".tmp")
+                    legacy.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == "symlink":
+                        legacy.symlink_to(protected)
+                    else:
+                        legacy.hardlink_to(protected)
+                promoted = onboarding.promote(self.croot, "focused", destination)
+                self.assertEqual(protected.read_bytes(), before)
+                selected = profiles.select(destination, identity(), ["python"], "backend", "correctness")
+                self.assertEqual(selected["id"], promoted["id"])
+
     def test_interrupted_attempt_keeps_reserved_campaign_time_on_resume(self):
         spec = self.campaign_spec()
         spec["limits"]["max_wall_seconds"] = 10
