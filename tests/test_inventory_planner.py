@@ -253,6 +253,61 @@ class PlanningTests(GitCase):
             with self.subTest(analysis=analysis), self.assertRaises(ValueError):
                 planner.build(self.bundle, analysis)
 
+    def test_optional_aspects_require_explicit_nonblank_reason(self):
+        self.inventory()
+        for aspect in planner.OPTIONAL:
+            for reason in (None, "", " \n\t", 1, {}, [], planner.NO_OPTIONAL_REASON):
+                with self.subTest(aspect=aspect, reason=reason):
+                    analysis = {"files": {"a.py": {"aspects": [aspect]}}}
+                    if reason is not None:
+                        analysis["optional_reason"] = reason
+                    with self.assertRaisesRegex(ValueError, "changed-behavior reason"):
+                        planner.build(self.bundle, analysis)
+
+    def test_validation_rejects_removed_optional_reason(self):
+        plan = self.plan({"files": {"a.py": {"aspects": ["simplification"]}},
+                          "optional_reason": "Changed response mapping duplicates an existing conversion"})
+        for reason in (None, "", "  ", planner.NO_OPTIONAL_REASON):
+            with self.subTest(reason=reason):
+                changed = copy.deepcopy(plan)
+                changed["optional_reason"] = reason
+                with self.assertRaisesRegex(ValueError, "changed-behavior reason"):
+                    planner.validate(rehash(changed), self.inv, self.bundle)
+
+    def test_unjustified_optional_gaps_are_rejected(self):
+        (self.repo / "a.py").write_text("# " + "x" * 80000 + "\n")
+        self.head = commit(self.repo)
+        self.inventory()
+        analysis = {"files": {"a.py": {"aspects": ["simplification"]}}}
+        with self.assertRaisesRegex(ValueError, "changed-behavior reason"):
+            planner.build(self.bundle, analysis)
+        analysis["optional_reason"] = "Changed response mapping duplicates an existing conversion"
+        plan = planner.build(self.bundle, analysis)
+        self.assertFalse(plan["tasks"])
+        self.assertTrue(any(g["aspects"] == ["simplification"] for g in plan["gaps"]))
+
+    def test_supplemental_optional_task_still_requires_reason(self):
+        plan = self.plan({"files": {"a.py": {"aspects": ["simplification"]}},
+                          "optional_reason": "Changed mapping duplicates a conversion"})
+        plan["expected"] = [pair for pair in plan["expected"] if pair[1] not in planner.OPTIONAL]
+        next(t for t in plan["tasks"] if t["stage"] == "optional")["supplemental"] = True
+        planner.validate(rehash(plan), self.inv, self.bundle)
+        for reason in (None, planner.NO_OPTIONAL_REASON):
+            with self.subTest(reason=reason):
+                plan["optional_reason"] = reason
+                with self.assertRaisesRegex(ValueError, "changed-behavior reason"):
+                    planner.validate(rehash(plan), self.inv, self.bundle)
+
+    def test_optional_gap_without_expected_pair_still_requires_reason(self):
+        plan = self.plan()
+        plan["gaps"].append({"hunks": [self.inv["hunks"][0]["id"]],
+                             "aspects": ["simplification"], "reason": "Separate inspection"})
+        for reason in (None, planner.NO_OPTIONAL_REASON):
+            with self.subTest(reason=reason):
+                plan["optional_reason"] = reason
+                with self.assertRaisesRegex(ValueError, "changed-behavior reason"):
+                    planner.validate(rehash(plan), self.inv, self.bundle)
+
     def test_missing_and_duplicate_coverage_rejected(self):
         plan = self.plan()
         for duplicate in (False, True):
