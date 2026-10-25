@@ -1,10 +1,11 @@
 """Exercise the public CLI and its on-disk handoffs without model calls."""
+import copy
 import hashlib
 import json
 import subprocess
 import sys
 
-from support import GitCase, SKILL, commit
+from support import GitCase, SKILL, commit, planner, rehash
 
 
 class CliTests(GitCase):
@@ -147,3 +148,30 @@ class CliTests(GitCase):
         self.write_json(path, receipt)
         error = self.outcome("report", expected=2)
         self.assertEqual(error, {"error": "stale task receipt", "status": "incomplete"})
+
+    def reject_invalid_optional_reasons(self, plan):
+        for reason in (None, " \n\t", {}, planner.NO_OPTIONAL_REASON):
+            with self.subTest(reason=reason):
+                changed = copy.deepcopy(plan)
+                if reason is None:
+                    changed.pop("optional_reason")
+                else:
+                    changed["optional_reason"] = reason
+                self.write_json(self.plan_path, rehash(changed))
+                error = self.cli("validate", "--bundle", self.bundle,
+                                 "--plan", self.plan_path, expected=2)
+                self.assertEqual(error, {
+                    "error": "optional review requires an explicit changed-behavior reason",
+                    "status": "incomplete",
+                })
+
+    def test_persisted_optional_plan_requires_reason(self):
+        self.reject_invalid_optional_reasons(self.prepare())
+
+    def test_persisted_optional_gap_plan_requires_reason(self):
+        (self.repo / "a.py").write_text("# " + "x" * 80000 + "\n")
+        self.head = commit(self.repo)
+        plan = self.prepare()
+        self.assertFalse(plan["tasks"])
+        self.assertTrue(any(g["aspects"] == ["simplification"] for g in plan["gaps"]))
+        self.reject_invalid_optional_reasons(plan)

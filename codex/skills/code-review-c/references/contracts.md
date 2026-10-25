@@ -62,7 +62,11 @@ Controller analysis is an optional JSON object:
 ```
 
 The six essential aspects cannot be removed. Optional aspects are explicit; no
-default improvement pass runs. Unknown paths/aspects and unpinned evidence fail.
+default improvement pass runs. Requesting an optional aspect requires an explicit,
+nonblank `optional_reason` identifying the changed behavior that warrants it,
+including when its hunks become coverage gaps. The controller checks the reason
+against pinned evidence; the helper rejects missing or empty reasons. Unknown
+paths/aspects and unpinned evidence fail.
 
 Campaign fixtures have `id`, `repo`, explicit `base`/`head`, `split: train|heldout`,
 `dimensions` (`patch_size`, `support`, `file_count`, `languages`, `defect_position`),
