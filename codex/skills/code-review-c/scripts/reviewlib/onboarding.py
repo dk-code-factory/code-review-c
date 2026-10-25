@@ -205,7 +205,7 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
     """
     root = external(root)
     c = read(root)
-    if not re.fullmatch(r"[\w./:-]+@sha256:[0-9a-f]{64}", image):
+    if not re.fullmatch(r"(?:[\w./:-]+@)?sha256:[0-9a-f]{64}", image):
         raise ValueError("trial image must be pinned by sha256 digest")
     limits = c["limits"]
     for key, value in (("max_calls", max_calls), ("max_wall_seconds", max_wall_seconds), ("trial_seconds", trial_seconds)):
@@ -214,7 +214,8 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
     # A previously started trial still spends its call allowance after a crash.
     attempts = list((root / "attempts").glob("*/receipt.json"))
     used_calls = sum(bool(load(p).get("launched")) for p in attempts)
-    used_time = sum(load(p).get("reserved_seconds", trial_seconds) if load(p).get("status") == "started"
+    used_time = sum(max(load(p).get("reserved_seconds", trial_seconds), load(p).get("elapsed_seconds", trial_seconds))
+                    if load(p).get("status") in {"started", "interrupted", "cleanup-failed"}
                     else load(p).get("elapsed_seconds", trial_seconds) for p in attempts)
     config = __import__("tomllib").loads(Path(host_config).read_text())
     if set(config) != {"model", "model_reasoning_effort"}:
@@ -223,7 +224,11 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
         raise ValueError("host-selected identity differs from frozen campaign")
     if not shutil.which("docker"):
         raise ValueError("Docker is required for isolated model trials")
-    version = subprocess.check_output(["docker", "run", "--rm", "--network=none", "--entrypoint", "codex", image, "--version"], text=True, timeout=30).strip()
+    probe = "crc-version-" + os.urandom(12).hex()
+    try:
+        version = subprocess.check_output(["docker", "run", "--rm", "--name", probe, "--network=none", "--entrypoint", "codex", image, "--version"], text=True, timeout=30).strip()
+    finally:
+        subprocess.run(["docker", "rm", "-f", probe], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=15)
     if version != c["identity"]["codex_version"]:
         raise ValueError("container Codex version differs from frozen identity")
     schema = SKILL / "references" / "schemas" / "calibration-result.json"
@@ -259,7 +264,7 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
                     shutil.copyfile(local_ref(root, prompt["ref"]), temp / "input" / "prompt.txt")
                     shutil.copyfile(schema, temp / "input" / "schema.json")
                     container = "crc-" + digest(str(trial))[:20]
-                    command = ["docker", "run", "--rm", "--name", container, "--entrypoint", "codex",
+                    command = ["docker", "run", "--rm", "--interactive", "--name", container, "--entrypoint", "codex",
                         "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only",
                         "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m", "--user", f"{os.getuid()}:{os.getgid()}",
                         "-e", "CODEX_HOME=/codex-home", "-e", "HOME=/tmp",
@@ -282,6 +287,9 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
                         receipt["status"] = "finished" if result.returncode == 0 else "failed"
                     except subprocess.TimeoutExpired:
                         receipt["status"] = "timeout"
+                    except KeyboardInterrupt:
+                        receipt["status"] = "interrupted"
+                        raise
                     except OSError as error:
                         receipt["status"] = "failed"
                         receipt["error"] = str(error)
@@ -450,8 +458,10 @@ def compare(root):
 
 
 def promote(root, strategy, output):
-    output = external(output)
     c = read(root)
+    repositories = [inventory.read(Path(root) / "fixtures" / f["id"] / "bundle")["repo"]
+                    for f in c["fixtures"]]
+    output = external(output, *repositories)
     report = compare(root)
     selected = next(s for s in report["strategies"] if s["id"] == strategy)
     if not report["qualifying"] or not selected["passing"]:
@@ -468,8 +478,19 @@ def promote(root, strategy, output):
         limits=selected["measured_limits"], quality={k: selected["heldout"][k] for k in ("recall", "precision")},
         cost={"tokens": selected["heldout"]["tokens"], "latency_seconds": selected["heldout"]["latency_seconds"]},
         evidence={"report": report_ref, "sha256": digest(report), "campaign_id": c["id"]})
-    save(output / report_ref, report)
-    save(output / (profile["id"] + ".json"), profile)
+    report_path = local_ref(output, report_ref)
+    profile_path = local_ref(output, profile["id"] + ".json")
+    if report_path == profile_path:
+        raise ValueError("profile export destinations must be distinct")
+    for path in (report_path, profile_path):
+        external(path, *repositories)
+    output.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".profile-export-", dir=output) as temporary:
+        for name, path, value in (("report.json", report_path, report), ("profile.json", profile_path, profile)):
+            staged = Path(temporary) / name
+            save(staged, value)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            staged.replace(path)
     return profile
 
 

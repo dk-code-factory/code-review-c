@@ -88,6 +88,118 @@ class OnboardingTests(GitCase):
         with self.assertRaises(ValueError):
             onboarding.promote(self.croot, "focused", self.root / "profiles")
 
+    def test_promotion_rejects_every_reviewed_repository_and_symlink_alias(self):
+        self.freeze(full=True)
+        synthetic_trials(self.croot, self.c)
+        # The later fixture ensures protection is not limited to the first repo.
+        repository = self.root / "heldout3"
+        alias = self.root / "fixture-alias"
+        alias.symlink_to(repository, target_is_directory=True)
+        for destination in (repository / "private-profiles", alias / "private-profiles"):
+            with self.subTest(destination=str(destination)):
+                with self.assertRaisesRegex(ValueError, "outside repository/package"):
+                    onboarding.promote(self.croot, "focused", destination)
+                self.assertFalse(destination.exists())
+        output = self.root / "external-profiles"
+        profile = onboarding.promote(self.croot, "focused", output)
+        self.assertTrue((output / (profile["id"] + ".json")).is_file())
+
+        report_ref = profile["evidence"]["report"]
+        profile_ref = profile["id"] + ".json"
+        for target in (repository, self.root / "other-private"):
+            target.mkdir(exist_ok=True)
+            for ref in (report_ref, profile_ref):
+                with self.subTest(target=str(target), ref=ref):
+                    destination = self.root / f"linked-{target.name}-{Path(ref).name}"
+                    link = destination / ref
+                    link.parent.mkdir(parents=True)
+                    protected = target / "private-export.json"
+                    link.symlink_to(protected)
+                    with self.assertRaisesRegex(ValueError, "artifact reference escapes bundle"):
+                        onboarding.promote(self.croot, "focused", destination)
+                    self.assertFalse(protected.exists())
+                    self.assertFalse((destination / report_ref).is_file())
+                    self.assertFalse((destination / profile_ref).is_file())
+
+        destination = self.root / "colliding-exports"
+        link = destination / report_ref
+        link.parent.mkdir(parents=True)
+        link.symlink_to(destination / profile_ref)
+        with self.assertRaisesRegex(ValueError, "destinations must be distinct"):
+            onboarding.promote(self.croot, "focused", destination)
+        self.assertFalse((destination / profile_ref).exists())
+
+    def test_promotion_ignores_linked_legacy_temporary_paths(self):
+        self.freeze(full=True)
+        synthetic_trials(self.croot, self.c)
+        profile = onboarding.promote(self.croot, "focused", self.root / "profiles")
+        protected = self.root / "heldout3/f0.py"
+        before = protected.read_bytes()
+        for kind in ("symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                destination = self.root / ("legacy-" + kind)
+                for ref in (profile["evidence"]["report"], profile["id"] + ".json"):
+                    legacy = destination / (ref + ".tmp")
+                    legacy.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == "symlink":
+                        legacy.symlink_to(protected)
+                    else:
+                        legacy.hardlink_to(protected)
+                promoted = onboarding.promote(self.croot, "focused", destination)
+                self.assertEqual(protected.read_bytes(), before)
+                selected = profiles.select(destination, identity(), ["python"], "backend", "correctness")
+                self.assertEqual(selected["id"], promoted["id"])
+
+    def test_interrupted_attempt_keeps_reserved_campaign_time_on_resume(self):
+        spec = self.campaign_spec()
+        spec["limits"]["max_wall_seconds"] = 10
+        save(self.root / "spec.json", spec)
+        campaign = self.root / "campaign"
+        onboarding.freeze(self.root / "spec.json", campaign)
+        receipt = campaign / "attempts/train0--focused--0/receipt.json"
+        config = self.root / "host.toml"
+        config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
+        def cleanup_only(command, **kwargs):
+            self.assertEqual(command[:2], ["docker", "rm"], "No remaining trial time")
+            return subprocess.CompletedProcess(command, 0)
+        for status, reserved, elapsed in (("interrupted", 10, 1), ("cleanup-failed", 10, 1),
+                                          ("cleanup-failed", 1, 10)):
+            with self.subTest(status=status, reserved=reserved, elapsed=elapsed):
+                save(receipt, record("trial-receipt", status=status, launched=True,
+                                     reserved_seconds=reserved, elapsed_seconds=elapsed))
+                before = receipt.read_bytes()
+                with patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
+                     patch.object(onboarding.subprocess, "check_output", return_value="codex-cli synthetic\n"), \
+                     patch.object(onboarding.subprocess, "run", side_effect=cleanup_only):
+                    result = onboarding.run(campaign, "sha256:" + "a" * 64, config, "unused", 1, 10, 5)
+                self.assertEqual(result["launched"], 0)
+                self.assertEqual(receipt.read_bytes(), before)
+
+    def test_version_probe_cleanup_and_failure_visibility(self):
+        self.freeze()
+        config = self.root / "host.toml"
+        config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
+        for failure in (subprocess.TimeoutExpired(["docker"], 30), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
+                     patch.object(onboarding.subprocess, "check_output", side_effect=failure) as probe, \
+                     patch.object(onboarding.subprocess, "run") as cleanup:
+                    with self.assertRaises(type(failure)):
+                        onboarding.run(self.croot, "sha256:" + "a" * 64, config, "unused", 1, 10, 5)
+                command = probe.call_args.args[0]
+                name = command[command.index("--name") + 1]
+                self.assertTrue(name.startswith("crc-version-"))
+                cleanup.assert_called_once_with(["docker", "rm", "-f", name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=15)
+        def removal_failure(command, **kwargs):
+            raise subprocess.CalledProcessError(1, command, stderr=b"Synthetic removal failure")
+        with patch.object(onboarding.shutil, "which", return_value="/fake/docker"), \
+             patch.object(onboarding.subprocess, "check_output", return_value="codex-cli synthetic\n"), \
+             patch.object(onboarding.subprocess, "run", side_effect=removal_failure):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                onboarding.run(self.croot, "sha256:" + "a" * 64, config, "unused", 1, 10, 5)
+        self.assertIn("crc-version-", str(raised.exception))
+
     def test_critical_miss_and_false_positive_preserved(self):
         self.freeze(full=True)
         synthetic_trials(self.croot, self.c)
@@ -181,6 +293,7 @@ class OnboardingTests(GitCase):
                 return subprocess.CompletedProcess(command, 0)
             calls.append(command)
             self.assertIn("--ephemeral", command)
+            self.assertIn("--interactive", command)
             self.assertIn("read-only", command)
             self.assertNotIn("--model", command)
             self.assertNotIn("-m", command)
