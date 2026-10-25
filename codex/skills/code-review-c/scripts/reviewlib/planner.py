@@ -25,7 +25,7 @@ def instructions(aspect, languages, domain):
 
 
 def render(task, inv, bundle, tail=""):
-    # Display all bytes as UTF-8. Invalid source bytes use reversible backslash escapes.
+    # Display all bytes as UTF-8. Invalid source bytes use backslash escapes.
     brief = {k: task[k] for k in ("id", "aspect", "stage", "hunks", "prerequisites", "purpose")}
     brief["limits"] = task["limits"]
     brief["host_input_bytes"] = task["host_input_bytes"]
@@ -160,14 +160,20 @@ def build(bundle, analysis=None, identity=None, profile_dir=None, host_input_byt
             gaps.append({"hunks": owned, "aspects": ["contracts"],
                          "reason": "Connected interface evidence exceeds budget."})
     essential_ids = [t["id"] for t in tasks if t["stage"] == "essential"]
+    retained = []
     for t in tasks:
         if t["stage"] == "optional":
             t["prerequisites"] = essential_ids
         prompt, t["bytes"] = render(t, inv, bundle)
+        if t["stage"] == "optional" and not fits(t, t["bytes"], by_id):
+            gaps.append({"hunks": t["hunks"], "aspects": [t["aspect"]],
+                         "reason": "Optional task with essential prerequisites exceeds budget."})
+            continue
         t["input_hash"] = digest(prompt.encode())
+        retained.append(t)
     plan = record("review-plan", inventory_id=inv["id"], base=inv["base"], head=inv["head"],
                   diff_base=inv["diff_base"], identity=identity, instruction_hash=instruction_hash(),
-                  expected=expected, tasks=tasks, gaps=gaps,
+                  expected=expected, tasks=retained, gaps=gaps,
                   optional_reason=analysis.get("optional_reason", "No changed behavior was identified as warranting optional improvement review."))
     plan["id"] = digest(plan)
     validate(plan, inv, bundle)

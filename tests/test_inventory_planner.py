@@ -4,7 +4,7 @@ import subprocess
 from unittest.mock import patch
 
 from support import GitCase, SKILL, commit, git, identity, rehash
-from reviewlib import inventory, planner, profiles
+from reviewlib import inventory, planner, profiles, records
 from reviewlib.records import digest, external, save
 
 
@@ -70,6 +70,51 @@ class InventoryTests(GitCase):
             inventory.build(self.repo, self.repo / "private", self.base, self.head)
         with self.assertRaises(ValueError):
             external(SKILL / "private")
+
+    def test_submodule_changes_ignore_local_diff_configuration(self):
+        git(self.repo, "reset", "--hard", self.base)
+        git(self.repo, "update-index", "--add", "--cacheinfo", f"160000,{self.base},module")
+        git(self.repo, "commit", "-m", "Add gitlink")
+        base = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-index", "--cacheinfo", f"160000,{self.head},module")
+        git(self.repo, "commit", "-m", "Update gitlink")
+        head = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "config", "diff.ignoreSubmodules", "all")
+        git(self.repo, "config", "submodule.module.ignore", "all")
+        for style in ("short", "log", "diff"):
+            with self.subTest(style=style):
+                git(self.repo, "config", "diff.submodule", style)
+                bundle = self.root / style
+                inv = inventory.build(self.repo, bundle, base, head)
+                self.assertEqual([f["path"] for f in inv["files"]], ["module"])
+                self.assertTrue(inv["hunks"])
+                self.assertTrue(all(h["opaque"] for h in inv["hunks"]))
+                plan = planner.build(bundle)
+                self.assertFalse(plan["tasks"])
+                self.assertEqual(len(plan["gaps"]), len(planner.ESSENTIAL))
+                planner.validate(plan, inv, bundle)
+
+    def test_standalone_and_plugin_private_storage_boundaries(self):
+        home = self.root / "home"
+        standalone = home / ".codex/skills/code-review-c"
+        standalone.mkdir(parents=True)
+        state = home / ".local/state/code-review-c"
+        with patch.object(records, "SKILL", standalone):
+            self.assertEqual(external(state), state)
+            with self.assertRaises(ValueError):
+                external(standalone / "private")
+            with self.assertRaises(ValueError):
+                external(self.repo / "private", self.repo)
+        package = home / "plugins/code-review-c"
+        plugin_skill = package / "codex/skills/code-review-c"
+        plugin_skill.mkdir(parents=True)
+        (package / ".codex-plugin").mkdir()
+        (package / ".codex-plugin/plugin.json").write_text('{"name": "code-review-c"}')
+        with patch.object(records, "SKILL", plugin_skill):
+            self.assertEqual(external(state), state)
+            for output in (plugin_skill / "private", package / "private"):
+                with self.subTest(output=output), self.assertRaises(ValueError):
+                    external(output)
 
     def test_pr_metadata_and_merge_base_pinned(self):
         metadata = {"number": 7, "url": "https://github.com/org/repo/pull/7", "title": "Pinned", "body": "Acceptance",
@@ -151,6 +196,30 @@ class PlanningTests(GitCase):
         for t in plan["tasks"]:
             aspects = [r["ref"] for r in t["instructions"] if "/aspects/" in r["ref"]]
             self.assertEqual(aspects, [f'references/aspects/{t["aspect"]}.md'])
+
+    def test_optional_prerequisite_overflow_preserves_essential_plan(self):
+        analysis = {"files": {"a.py": {"aspects": ["simplification"]}}}
+        full = self.plan(analysis)
+        optional = copy.deepcopy(next(t for t in full["tasks"] if t["stage"] == "optional"))
+        optional["prerequisites"] = []
+        _, accounting = planner.render(optional, self.inv, self.bundle)
+        budget = accounting["total"]
+        select = profiles.select
+
+        def constrained_profile(profile_dir, model, languages, domain, aspect):
+            profile = copy.deepcopy(select(profile_dir, model, languages, domain, aspect))
+            if aspect == "simplification":
+                profile["limits"]["total_visible_bytes"] = budget
+            return profile
+
+        with patch.object(profiles, "select", side_effect=constrained_profile):
+            plan = planner.build(self.bundle, analysis)
+        self.assertEqual(plan["tasks"], [t for t in full["tasks"] if t["stage"] == "essential"])
+        self.assertEqual(len(plan["gaps"]), 1)
+        self.assertEqual(plan["gaps"][0]["hunks"], optional["hunks"])
+        self.assertEqual(plan["gaps"][0]["aspects"], ["simplification"])
+        self.assertIn("prerequisites", plan["gaps"][0]["reason"])
+        planner.validate(plan, self.inv, self.bundle)
 
     def test_unknown_paths_aspects_and_unpinned_context_fail(self):
         self.inventory()

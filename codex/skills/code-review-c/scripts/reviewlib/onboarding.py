@@ -56,6 +56,9 @@ def prepare(output):
 
 def archive(repo, rev, destination):
     """Only regular files/directories; fixture links never expose host answer keys."""
+    entries = inventory.git(repo, "ls-tree", "-r", "-z", rev).split(b"\0")
+    if any(entry.startswith(b"160000 ") for entry in entries):
+        raise ValueError("fixtures must not contain submodules")
     raw = inventory.git(repo, "archive", "--format=tar", rev)
     destination.mkdir(parents=True)
     with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
@@ -117,6 +120,9 @@ def freeze(spec_path, output):
         raise ValueError("baseline must be focused")
     fixtures, keys, seen = [], {}, set()
     for f in spec["fixtures"]:
+        host_input_bytes = f.get("host_input_bytes", 8000)
+        if type(host_input_bytes) is not int or host_input_bytes < 0:
+            raise ValueError("host visible-input reservation must be a nonnegative integer")
         _identifier(f["id"])
         if f["id"] in seen or f["split"] not in {"train", "heldout"}:
             raise ValueError("duplicate fixture or invalid split")
@@ -144,7 +150,7 @@ def freeze(spec_path, output):
                 raise ValueError("fixture language falls outside measured profile scope")
             task = planner._task(0, spec["scope"]["aspect"], langs, spec["scope"]["domain"],
                 "calibration fixture", {"id": "candidate", "limits": strategy["limits"]},
-                f.get("host_input_bytes", 8000), [])
+                host_input_bytes, [])
             task["hunks"] = [h["id"] for h in inv["hunks"]]
             task["evidence"] = [{**e, "sha256": digest(inventory.support(inv, e))} for e in f.get("evidence", [])]
             for aspect in strategy["aspects"][1:]:
@@ -166,6 +172,8 @@ def freeze(spec_path, output):
         fixtures.append({"id": f["id"], "split": f["split"], "dimensions": f["dimensions"],
                          "file_count": len(inv["files"]), "languages": sorted({h["language"] for h in inv["hunks"]}),
                          "workspace_hash": tree_hash(root / "workspace"), "prompts": prompts})
+    if set(spec["scope"]["languages"]) != {language for f in fixtures for language in f["languages"]}:
+        raise ValueError("each scope language needs measured fixture evidence")
     campaign = record("campaign", identity=identity, scope=spec["scope"], baseline=spec["baseline"],
                       strategies=spec["strategies"], limits=spec["limits"], fixtures=fixtures,
                       keys_hash=digest(keys), repetitions=3)
@@ -405,9 +413,11 @@ def compare(root):
                                 and set(result["inspected_hunks"]) == set(prompt["hunks"])
                                 and type(result["extra_visible_bytes"]) is int and result["extra_visible_bytes"] >= 0
                                 and result["extra_visible_bytes"] + prompt["bytes"]["total"] <= strategy["limits"]["total_visible_bytes"]
-                                and not g["unresolved"] and not g["critical_misses"]
+                                and not g["unresolved"]
                                 and receipt["elapsed_seconds"] > 0)
-                    trials.append({"key": key, "split": fixture["split"], "complete": complete,
+                    if not complete:
+                        missing.append(key)
+                    trials.append({"key": key, "split": fixture["split"], "complete": complete and not g["critical_misses"],
                                    "recall": g["recall"], "precision": g["precision"],
                                    "measured": {"total_visible_bytes": prompt["bytes"]["total"] + result["extra_visible_bytes"],
                                                 "patch_bytes": prompt["bytes"]["patch"],

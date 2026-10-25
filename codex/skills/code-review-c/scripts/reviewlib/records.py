@@ -69,7 +69,8 @@ def save(path, value):
 
 def external(path, *repositories):
     path = Path(path).resolve()
-    for root in (SKILL.parents[2], *repositories):
+    package = next((root for root in SKILL.parents if (root / ".codex-plugin/plugin.json").is_file()), SKILL)
+    for root in (SKILL, package, *repositories):
         if path.is_relative_to(Path(root).resolve()):
             raise ValueError(f"private artifacts must be outside repository/package: {path}")
     return path

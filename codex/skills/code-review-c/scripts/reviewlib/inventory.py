@@ -58,7 +58,8 @@ def build(repo, output, base=None, head=None, pr=None):
         raise ValueError("explicit base and head revisions are required")
     base, head = revision(repo, base), revision(repo, head)
     diff_base = git(repo, "merge-base", base, head).decode().strip() if pr else base
-    fields = git(repo, "diff", "--name-status", "-z", "--find-renames", diff_base, head, "--").split(b"\0")
+    fields = git(repo, "diff", "--name-status", "-z", "--find-renames", "--ignore-submodules=none",
+                 diff_base, head, "--").split(b"\0")
     files, hunks = [], []
     while fields and fields[0]:
         status = fields.pop(0).decode("ascii")
@@ -67,7 +68,8 @@ def build(repo, output, base=None, head=None, pr=None):
         old, new = old_raw.decode("utf-8", "surrogateescape"), new_raw.decode("utf-8", "surrogateescape")
         paths = list(dict.fromkeys([old, new]))
         patch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--binary",
-                    "--find-renames", "--unified=3", diff_base, head, "--",
+                    "--find-renames", "--unified=3", "--ignore-submodules=none", "--submodule=short",
+                    diff_base, head, "--",
                     *[":(literal)" + p for p in paths])
         matches = list(HUNK.finditer(patch))
         header = patch[:matches[0].start()] if matches else b""

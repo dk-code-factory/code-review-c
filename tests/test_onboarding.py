@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-from support import GitCase, identity, synthetic_trials
+from support import GitCase, commit, git, identity, synthetic_trials
 from reviewlib import onboarding, profiles
 from reviewlib.records import digest, load, record, save
 
@@ -38,6 +38,57 @@ class OnboardingTests(GitCase):
         save(self.root / "spec.json", spec)
         with self.assertRaisesRegex(ValueError, "measured"):
             onboarding.freeze(self.root / "spec.json", self.root / "bad")
+
+    def test_freeze_rejects_unchanged_nested_submodule(self):
+        spec = self.campaign_spec()
+        fixture = spec["fixtures"][0]
+        repo = Path(fixture["repo"])
+        pin = fixture["base"]
+        for revision in ("base", "head"):
+            git(repo, "checkout", "--detach", fixture[revision])
+            git(repo, "update-index", "--add", "--cacheinfo", "160000", pin, "nested/module")
+            git(repo, "commit", "-m", "Include unchanged submodule")
+            fixture[revision] = git(repo, "rev-parse", "HEAD")
+        fixture["evidence"][0]["revision"] = fixture["head"]
+        save(self.root / "spec.json", spec)
+        with self.assertRaisesRegex(ValueError, "submodule"):
+            onboarding.freeze(self.root / "spec.json", self.root / "bad")
+
+    def test_freeze_rejects_invalid_host_input_reservations(self):
+        spec = self.campaign_spec()
+        for index, value in enumerate((-1, True, 1.5, "8000", None)):
+            with self.subTest(host_input_bytes=value):
+                spec["fixtures"][0]["host_input_bytes"] = value
+                save(self.root / "spec.json", spec)
+                with self.assertRaisesRegex(ValueError, "host.*nonnegative integer"):
+                    onboarding.freeze(self.root / "spec.json", self.root / f"bad-{index}")
+        spec["fixtures"][0]["host_input_bytes"] = 0
+        save(self.root / "spec.json", spec)
+        campaign = onboarding.freeze(self.root / "spec.json", self.root / "zero")
+        self.assertEqual(campaign["fixtures"][0]["prompts"]["focused"]["bytes"]["host"], 0)
+
+    def test_freeze_rejects_scope_languages_without_fixture_evidence(self):
+        spec = self.campaign_spec()
+        spec["scope"]["languages"].append("rust")
+        save(self.root / "spec.json", spec)
+        with self.assertRaisesRegex(ValueError, "scope language.*fixture"):
+            onboarding.freeze(self.root / "spec.json", self.root / "bad")
+
+    def test_freeze_accepts_scope_language_union_across_fixtures(self):
+        spec = self.campaign_spec()
+        fixture = self.fixture("go")
+        repo = Path(fixture["repo"])
+        for revision in ("base", "head"):
+            git(repo, "checkout", "--detach", fixture[revision])
+            git(repo, "mv", "f0.py", "f0.go")
+            fixture[revision] = commit(repo)
+        fixture["evidence"][0]["revision"] = fixture["head"]
+        spec["fixtures"].append(fixture)
+        spec["scope"]["languages"] = ["python", "go"]
+        save(self.root / "spec.json", spec)
+        campaign = onboarding.freeze(self.root / "spec.json", self.root / "multilanguage")
+        self.assertEqual([f["languages"] for f in campaign["fixtures"]], [["python"], ["go"]])
+        self.assertEqual(campaign["scope"]["languages"], ["go", "python"])
 
     def test_gold_and_prompt_drift_rejected(self):
         self.freeze()
@@ -87,6 +138,45 @@ class OnboardingTests(GitCase):
         self.assertIn("train0--focused--2", report["missing"])
         with self.assertRaises(ValueError):
             onboarding.promote(self.croot, "focused", self.root / "profiles")
+
+    def test_incomplete_matched_control_blocks_campaign_promotion(self):
+        self.freeze(full=True)
+        synthetic_trials(self.croot, self.c)
+        trial = self.croot / "attempts/train0--combined--0"
+        original = {name: load(trial / (name + ".json")) for name in ("receipt", "result", "decisions")}
+        for case in ("failed", "incomplete", "unmeasured", "unresolved"):
+            with self.subTest(case=case):
+                receipt, result, decisions = (copy.deepcopy(original[name]) for name in ("receipt", "result", "decisions"))
+                if case == "failed":
+                    receipt["status"] = "failed"
+                elif case == "incomplete":
+                    result["status"] = "incomplete"
+                elif case == "unmeasured":
+                    receipt["elapsed_seconds"] = 0
+                else:
+                    decisions["decisions"][0]["disposition"] = "unresolved"
+                save(trial / "result.json", result)
+                receipt["result_hash"] = digest((trial / "result.json").read_bytes())
+                save(trial / "receipt.json", receipt)
+                save(trial / "decisions.json", decisions)
+                onboarding.grade(self.croot, trial.name, trial / "decisions.json")
+                report = onboarding.compare(self.croot)
+                self.assertIn(trial.name, report["missing"])
+                self.assertFalse(report["qualifying"])
+                with self.assertRaisesRegex(ValueError, "blocks promotion"):
+                    onboarding.promote(self.croot, "focused", self.root / "profiles")
+
+    def test_measured_losing_control_remains_valid_comparison_evidence(self):
+        self.freeze(full=True)
+        synthetic_trials(self.croot, self.c)
+        trial = self.croot / "attempts/train0--combined--0"
+        save(trial / "decisions.json", record("grading-decisions", decisions=[
+            {"finding": "f1", "disposition": "false-positive", "evidence": ["Measured control missed the gold defect"]}]))
+        onboarding.grade(self.croot, trial.name, trial / "decisions.json")
+        report = onboarding.compare(self.croot)
+        self.assertTrue(report["qualifying"])
+        self.assertFalse(next(s for s in report["strategies"] if s["id"] == "combined")["passing"])
+        self.assertEqual(onboarding.promote(self.croot, "focused", self.root / "profiles")["strategy"], "focused")
 
     def test_critical_miss_and_false_positive_preserved(self):
         self.freeze(full=True)
