@@ -19,7 +19,8 @@ def record(kind, **values):
 
 def load(path, kind=None):
     value = json.loads(Path(path).read_text())
-    if kind and (not isinstance(value, dict) or value.get("kind") != kind or value.get("version") != VERSION):
+    if kind and (not isinstance(value, dict) or value.get("kind") != kind
+                 or type(value.get("version")) is not int or value["version"] != VERSION):
         raise ValueError(f"expected {kind} version {VERSION}: {path}")
     return value
 

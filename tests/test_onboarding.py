@@ -472,7 +472,7 @@ class OnboardingTests(GitCase):
         with self.assertRaisesRegex(ValueError, "combined controls"):
             onboarding.promote(self.croot, "combined", self.root / "profiles")
 
-    def fake_runner(self, timeout=False, interrupt=False, expected_launches=1):
+    def fake_runner(self, timeout=False, interrupt=False, expected_launches=1, image=None):
         config = self.root / "host.toml"
         config.write_text('model = "synthetic-exact-model"\nmodel_reasoning_effort = "high"\n')
         auth = self.root / "auth.json"
@@ -507,7 +507,7 @@ class OnboardingTests(GitCase):
              patch.object(onboarding.subprocess, "check_output", return_value="codex-cli synthetic\n"), \
              patch.object(onboarding.subprocess, "run", side_effect=run):
             try:
-                result = onboarding.run(self.croot, "example/codex@sha256:" + "a" * 64, config, auth, 1, 10, 5)
+                result = onboarding.run(self.croot, image or "example/codex@sha256:" + "a" * 64, config, auth, 1, 10, 5)
             finally:
                 self.assertEqual(len(cleanups), expected_launches + 1)
         self.assertEqual(result["launched"], expected_launches)
@@ -521,6 +521,34 @@ class OnboardingTests(GitCase):
         self.assertTrue(receipt["trace_hash"])
         self.assertTrue(receipt["result_hash"])
         self.assertEqual(receipt["status"], "finished")
+
+    def test_runner_accepts_immutable_local_image_id(self):
+        self.freeze()
+        receipt = self.fake_runner(image="sha256:" + "b" * 64)
+        self.assertEqual(receipt["status"], "finished")
+
+    def test_resume_rejects_invalid_receipts_before_docker_or_new_attempts(self):
+        self.freeze()
+        receipt = self.fake_runner()
+        path = self.croot / "attempts/train0--focused--0/receipt.json"
+        cases = [("kind", "task-result"), ("version", 2), ("version", True), ("version", 1.0)]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                save(path, {**receipt, field: value})
+                before = path.read_bytes()
+                with patch.object(onboarding.subprocess, "check_output", return_value="codex-cli synthetic\n") as probe, \
+                     patch.object(onboarding.subprocess, "run", side_effect=AssertionError("Invalid receipt reached Docker")) as runner:
+                    with self.assertRaisesRegex(ValueError, "expected trial-receipt version 1"):
+                        onboarding.run(self.croot, "example/codex@sha256:" + "b" * 64,
+                                       self.root / "host.toml", self.root / "auth.json", 1, 10, 5)
+                    probe.assert_not_called()
+                    runner.assert_not_called()
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(list((self.croot / "attempts").iterdir()), [path.parent])
+        save(path, receipt)
+        self.fake_runner()
+        self.assertEqual(load(path), receipt)
+        self.assertTrue((self.croot / "attempts/train0--focused--1/receipt.json").is_file())
 
     def test_runner_timeout_retains_failed_attempt(self):
         self.freeze()
