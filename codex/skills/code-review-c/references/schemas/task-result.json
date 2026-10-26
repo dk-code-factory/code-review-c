@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "task-result"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "plan_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "input_hash": {
+      "type": "string"
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "reasoning_effort": {
+              "type": "string"
+            },
+            "codex_version": {
+              "type": "string"
+            },
+            "instruction_hash": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "model",
+            "reasoning_effort",
+            "codex_version",
+            "instruction_hash"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "incomplete",
+        "failed"
+      ]
+    },
+    "inspected_hunks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extra_visible_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "enum": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "defect",
+              "improvement"
+            ]
+          },
+          "claim": {
+            "type": "string"
+          },
+          "hunks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "priority",
+          "category",
+          "claim",
+          "hunks",
+          "evidence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "kind",
+    "version",
+    "plan_id",
+    "task_id",
+    "input_hash",
+    "identity",
+    "status",
+    "inspected_hunks",
+    "extra_visible_bytes",
+    "findings",
+    "gaps"
+  ],
+  "additionalProperties": false
+}

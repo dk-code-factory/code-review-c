@@ -1,0 +1,10 @@
+{
+  "name": "code-review-c",
+  "interface": {"displayName": "code-review-c"},
+  "plugins": [{
+    "name": "code-review-c",
+    "source": {"source": "local", "path": "./"},
+    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+    "category": "Developer Tools"
+  }]
+}

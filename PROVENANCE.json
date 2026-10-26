@@ -1,0 +1,44 @@
+{
+  "version": "0.1.0",
+  "sources": [
+    {
+      "repository": "https://github.com/dk-code-factory/code-review-ad",
+      "commit": "5900df7e96463f0fc68a5c3c0d5e0dcfdf36cd95",
+      "license": "MIT",
+      "notice": "NOTICE",
+      "sourceHashes": {
+        "common/inspection.md": "80582feb0b2ec1db49eb0618b959fc7395c4a451c6420a205cf7450e3b125cce",
+        "common/reporting.md": "89edeba76749bc006420d6d7f33440ee9c8df71432836c72c2e0e76c698cd5e6",
+        "common/codex/passes/toolkit.md": "5033c2cf052084219a0e7ff50770d9fdecd2a75fcdbf0a92357f154469a85c69",
+        "common/codex/passes/standards.md": "687efa713215b1acb3f838252873309d504e21abb6eee5491d70015e0f205393",
+        "common/codex/passes/spec.md": "6eeb4841110941a677012d546e629131e8182f7ce600fc5d1ba9438e2742e349",
+        "common/codex/passes/performance.md": "4a776a01a7d8742fe980ee36c2156797c68863e4ec386785a85c1ed8d4663cdc"
+      },
+      "adaptedInto": [
+        "codex/skills/code-review-c/references/evidence.md",
+        "codex/skills/code-review-c/references/generic.md",
+        "codex/skills/code-review-c/references/aspects/"
+      ]
+    }
+  ],
+  "ownedChanges": {
+    "description": "New adaptive controller, focused backend guidance, deterministic inventory/planning/gates, onboarding harness and offline tests",
+    "paths": [
+      "codex/skills/code-review-c",
+      "scripts",
+      "tests"
+    ]
+  },
+  "documentation": [
+    {
+      "url": "https://developers.openai.com/blog/eval-skills",
+      "accessed": "2026-10-24",
+      "use": "Behavioral evaluation method; no copied code"
+    },
+    {
+      "url": "https://developers.openai.com/codex/noninteractive",
+      "accessed": "2026-10-24",
+      "use": "Isolated exec flags and structured output"
+    }
+  ]
+}
