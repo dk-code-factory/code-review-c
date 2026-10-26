@@ -63,6 +63,13 @@ see only pinned source/evidence and temporary Codex authentication, keeping answ
 keys outside the reviewer filesystem. Three matched repetitions, held-out fixtures,
 critical-defect recall, precision and completion gates precede profile promotion.
 
+On a POSIX host with Linux Docker, run `python3 scripts/test_runtime.py` for the
+same lifecycle checks run by Docker CI. The tests build an image with a fake Codex
+executable and synthetic authentication; they run no inference. They cover stdin,
+read-only source isolation, output capture, retained failures, trial timeout and
+interruption, and version-probe cleanup. The pinned Python base image may need to
+be downloaded. These checks do not measure review quality or model capacity.
+
 Keep review artifacts, campaign data, local profiles, credentials, private rules,
 caches and benchmark results outside the package and reviewed repository. Provenance
 for adapted review guidance is pinned in [PROVENANCE.json](PROVENANCE.json), with

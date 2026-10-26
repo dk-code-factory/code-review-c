@@ -235,14 +235,14 @@ def run(root, image, host_config, auth, max_calls, max_wall_seconds, trial_secon
     """
     root = external(root)
     c = read(root)
-    if not re.fullmatch(r"[\w./:-]+@sha256:[0-9a-f]{64}", image):
+    if not re.fullmatch(r"(?:[\w./:-]+@)?sha256:[0-9a-f]{64}", image):
         raise ValueError("trial image must be pinned by sha256 digest")
     limits = c["limits"]
     for key, value in (("max_calls", max_calls), ("max_wall_seconds", max_wall_seconds), ("trial_seconds", trial_seconds)):
         if type(value) is not int or value <= 0 or value > limits[key]:
             raise ValueError("explicit positive run limits must fit the frozen campaign")
     # A previously started trial still spends its call allowance after a crash.
-    attempts = [load(p) for p in (root / "attempts").glob("*/receipt.json")]
+    attempts = [load(p, "trial-receipt") for p in (root / "attempts").glob("*/receipt.json")]
     used_calls = sum(bool(r.get("launched")) for r in attempts)
     used_time = sum(max(r.get("reserved_seconds", trial_seconds), r.get("elapsed_seconds", trial_seconds))
                     if r.get("status") in {"started", "interrupted", "cleanup-failed"}

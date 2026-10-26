@@ -6,6 +6,9 @@ The first-release support target is Linux with CPython 3.11–3.15, Git, and a C
 host providing native agents. GitHub PR pinning additionally requires authenticated
 `gh`. Container trials require a working Linux Docker engine and an immutable image
 containing the selected Codex version. Review and preview do not need Docker.
+Use a registry reference pinned as `NAME@sha256:DIGEST`, or an immutable local
+`sha256:IMAGE_ID` from `docker image inspect`. Local IDs are specific to the Docker
+engine and must be loaded on another host before use; mutable tags are rejected.
 Other host platforms and Python versions have not been validated for this release.
 
 Install the `v0.1.0` tag as described in the repository README. Keep an old installed

@@ -61,8 +61,11 @@ keep all other evidence identical within each matched trial.
 
 ## Run isolated trials
 
-Provide an immutable Docker image (`IMAGE@sha256:...`) containing the desired Codex
+Provide an immutable Docker image (`IMAGE@sha256:...` or a local `sha256:IMAGE_ID`) containing the desired Codex
 version and its runtime dependencies, with `codex` on PATH and no custom entrypoint.
+Local image IDs must already exist in the selected Docker engine; mutable tags
+are rejected. The Docker lifecycle test builds its own fake reviewer and uses its
+immutable local ID without a registry adapter or model calls.
 Provide a sanitized host config containing **only** `model` and
 `model_reasoning_effort`, matching the frozen host-selected identity. The harness
 does not invent candidate overrides. Provide the existing host's `auth.json`; it
